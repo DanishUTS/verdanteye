@@ -1,6 +1,16 @@
-ros2_ws/build/
-ros2_ws/install/
-ros2_ws/log/
+# ROS2 build artefacts
+build/
+install/
+log/
+
+# Python cache
 **/__pycache__/
+
+# IDE clutter
 .vscode/
 .idea/
+*.code-workspace
+
+# Misc
+*.pyc
+.DS_Store
