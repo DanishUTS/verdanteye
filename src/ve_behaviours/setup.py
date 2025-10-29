@@ -1,4 +1,5 @@
 from setuptools import setup
+import os
 
 package_name = 've_behaviours'
 
@@ -10,16 +11,21 @@ setup(
         ('share/ament_index/resource_index/packages', [f'resource/{package_name}']),
         (f'share/{package_name}', ['package.xml']),
         (f'share/{package_name}/launch', ['launch/auto_wander_depth.launch.py']),
+        (f'share/{package_name}/launch', ['launch/ui.launch.py']),
+        (f'share/{package_name}/assets', [
+            've_behaviours/assets/VerdantEye.png',
+        ]),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
-    maintainer='Danish Silva',
-    maintainer_email='you@example.com',
-    description='Behaviour nodes (wander, UI helpers, etc.)',
+    maintainer='Gohan',
+    maintainer_email='gohan@todo.todo',
+    description='VerdantEye Husky control UI and autonomous depth navigation scripts',
     license='MIT',
     entry_points={
         'console_scripts': [
             'auto_wander_depth = ve_behaviours.auto_wander_depth:main',
+            'ui = ve_behaviours.ui:main',
         ],
     },
 )
