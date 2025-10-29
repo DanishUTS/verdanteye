@@ -294,5 +294,40 @@
       <pose>-14 -12 0 0 0 0</pose>
     </include>
 
+    <!-- Plants -->
+      <!-- 🌿 Green Bamboo Cluster (Left side of map, slightly closer together) -->
+      <include>
+      <uri>model://bamboo_thicket_GREEN</uri>
+      <name>bamboo_thicket_GREEN_1</name>
+      <pose>-8 -8 0 0 0 0</pose>
+      </include>
+      <include>
+      <uri>model://bamboo_thicket_GREEN</uri>
+      <name>bamboo_thicket_GREEN_2</name>
+      <pose>-8 -4 0 0 0 0</pose>
+      </include>
+      <include>
+      <uri>model://bamboo_thicket_GREEN</uri>
+      <name>bamboo_thicket_GREEN_3</name>
+      <pose>-8 -1 0 0 0 0</pose>
+      </include>
+
+      <!-- 🍁 Red Bamboo Cluster (Right side of map, slightly closer together) -->
+      <include>
+      <uri>model://bamboo_thicket_RED</uri>
+      <name>bamboo_thicket_RED_1</name>
+      <pose>-2 -1 0 0 0 0</pose>
+      </include>
+      <include>
+      <uri>model://bamboo_thicket_RED</uri>
+      <name>bamboo_thicket_RED_2</name>
+      <pose>1 -3 0 0 0 0</pose>
+      </include>
+      <include>
+      <uri>model://bamboo_thicket_RED</uri>
+      <name>bamboo_thicket_RED_3</name>
+      <pose>-5 4 0 0 0 0</pose>
+      </include>
+
   </world>
 </sdf>

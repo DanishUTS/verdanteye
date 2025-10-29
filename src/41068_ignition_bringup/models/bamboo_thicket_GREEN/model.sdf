@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<sdf version="1.8">
+  <model name="bamboo_thicket_GREEN">
+    <static>true</static>
+    <link name="link">
+      <visual name="visual">
+        <geometry>
+          <mesh>
+            <uri>model://bamboo_thicket_GREEN/meshes/GREEN.dae</uri>
+            <scale>0.04 0.04 0.04</scale>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+  </model>
+</sdf>
+
