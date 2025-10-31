@@ -1,4 +1,5 @@
 from setuptools import setup
+from glob import glob
 import os
 
 package_name = 've_behaviours'
@@ -8,13 +9,31 @@ setup(
     version='0.1.0',
     packages=[package_name],
     data_files=[
-        ('share/ament_index/resource_index/packages', [f'resource/{package_name}']),
-        (f'share/{package_name}', ['package.xml']),
-        (f'share/{package_name}/launch', ['launch/auto_wander_depth.launch.py']),
-        (f'share/{package_name}/launch', ['launch/ui.launch.py']),
-        (f'share/{package_name}/assets', [
+        ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
+        ('share/' + package_name, ['package.xml']),
+
+        ('share/' + package_name + '/launch', [
+            'launch/auto_wander_depth.launch.py',
+            'launch/ui.launch.py',
+            'launch/x3.launch.py']),
+
+        ('share/{package_name}/assets', [
             've_behaviours/assets/VerdantEye.png',
         ]),
+
+        ('share/' + package_name + '/config', [
+            'config/robot_localization.yaml',
+            'config/nav2_params.yaml',
+            'config/slam_params.yaml',
+        ]),
+
+        ('share/' + package_name + '/urdf', [
+            'urdf/x3.urdf.xacro',
+            'urdf/common_properties.urdf.xacro',
+            'urdf/x3.gazebo.xacro',
+        ]),
+        ('share/' + package_name + '/urdf/meshes', glob('urdf/meshes/*')),
+
     ],
     install_requires=['setuptools'],
     zip_safe=True,
