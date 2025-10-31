@@ -20,18 +20,8 @@ setup(
         ('share/{package_name}/assets', [
             've_behaviours/assets/VerdantEye.png',
         ]),
-
-        ('share/' + package_name + '/config', [
-            'config/robot_localization.yaml',
-            'config/nav2_params.yaml',
-            'config/slam_params.yaml',
-        ]),
-
-        ('share/' + package_name + '/urdf', [
-            'urdf/x3.urdf.xacro',
-            'urdf/common_properties.urdf.xacro',
-            'urdf/x3.gazebo.xacro',
-        ]),
+        
+        ('share/ve_behaviours/urdf_drone',    glob('urdf_drone/*')),
         ('share/' + package_name + '/urdf/meshes', glob('urdf/meshes/*')),
 
     ],
