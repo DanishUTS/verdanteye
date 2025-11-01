@@ -1,129 +1,141 @@
 <?xml version="1.0"?>
 <robot name="X3" xmlns:xacro="http://www.ros.org/wiki/xacro">
 
-  <!-- includes (leave paths as you’re using them now) -->
-  <xacro:include filename="$(find ve_behaviours)/urdf/common_properties.urdf.xacro"/>
-  <xacro:include filename="$(find ve_behaviours)/urdf/x3.gazebo.xacro"/>
+    <xacro:include filename="$(find ve_behaviours)/urdf/common_properties.urdf.xacro" />
+    <xacro:include filename="$(find ve_behaviours)/urdf/x3.gazebo.xacro" />
 
-  <!-- Base link -->
-  <link name="base_link">
-    <inertial>
-      <origin xyz="-0.00835 0 0"/>
-      <mass value="1.5"/>
-      <inertia ixx="0.0291" iyy="0.0291" izz="0.0552" ixy="0" ixz="0" iyz="0"/>
-    </inertial>
-    <visual>
-      <geometry>
-        <mesh filename="file://$(find ve_behaviours)/urdf/meshes/x3.dae" scale="1 1 1"/>
-      </geometry>
-    </visual>
-    <collision>
-      <geometry>
-        <box size="0.47 0.47 0.11"/>
-      </geometry>
-    </collision>
-  </link>
+    <!-- Base link -->
+    <link name="base_link">
+        <inertial>
+            <origin xyz="-0.00835 0 0"/>
+            <mass value="1.5" />
+            <inertia ixx="0.0291" iyy="0.0291" izz="0.0552" ixy="0" ixz="0" iyz="0" />
+        </inertial>
+        <visual>
+            <geometry>
+                <mesh filename="file://$(find ve_behaviours)/urdf/meshes/x3.dae"
+                    scale="1 1 1" />
+            </geometry>
+        </visual>
+        <collision>
+            <geometry>
+                <box size="0.47 0.47 0.11" />
+            </geometry>
+        </collision>
+    </link>
 
-  <!-- Rotor macro + instances (unchanged) -->
-  <xacro:macro name="rotor" params="name xyz rpy mesh_file color">
-    <link name="${name}">
+    <!-- Rotors -->
+    <xacro:macro name="rotor" params="name xyz rpy mesh_file color">
+        <link name="${name}">
+            <inertial>
+                <mass value="0.005" />
+                <inertia ixx="9.75e-07" iyy="4.17041e-05" izz="4.26041e-05" ixy="0" ixz="0" iyz="0" />
+            </inertial>
+            <visual>
+                <geometry>
+                    <mesh filename="file://$(find ve_behaviours)/urdf/meshes/${mesh_file}"
+                        scale="0.1 0.1 0.1" />
+                </geometry>
+                <material name="${color}" />
+            </visual>
+            <collision>
+                <geometry>
+                    <cylinder radius="0.1" length="0.005" />
+                </geometry>
+            </collision>
+        </link>
+        <joint name="${name}_joint" type="continuous">
+            <parent link="base_link" />
+            <child link="${name}" />
+            <origin xyz="${xyz}" rpy="${rpy}" />
+            <axis xyz="0 0 1" />
+        </joint>
+    </xacro:macro>
+
+    <!-- Rotor instances -->
+    <xacro:rotor name="rotor_0" xyz="0.13 -0.22 0.023" rpy="0 0 0"
+        mesh_file="propeller_ccw.dae" color="blue" />
+    <xacro:rotor name="rotor_1" xyz="-0.13 0.2 0.023" rpy="0 0 0"
+        mesh_file="propeller_ccw.dae" color="red" />
+    <xacro:rotor name="rotor_2" xyz="0.13 0.22 0.023" rpy="0 0 0"
+        mesh_file="propeller_cw.dae" color="blue" />
+    <xacro:rotor name="rotor_3" xyz="-0.13 -0.2 0.023" rpy="0 0 0"
+        mesh_file="propeller_cw.dae" color="red" />
+
+    <!-- IMU -->
+    <joint name="imu_joint" type="fixed">
+        <parent link="base_link" />
+        <child link="imu_link" />
+        <origin xyz="0.0 0 0.068" rpy="0 0 0" />
+    </joint>
+
+    <link name="imu_link" />
+
+    <!-- LiDAR -->
+    <joint name="scan_joint" type="fixed">
+        <parent link="base_link" />
+        <child link="base_scan" />
+        <origin xyz="0 0 0.06" rpy="0 0 0" />
+    </joint>
+
+    <link name="base_scan">
+        <visual>
+            <origin xyz="0 0 0" rpy="0 0 0" />
+            <geometry>
+                <cylinder length="0.04" radius="0.09" />
+            </geometry>
+            <material name="dark" />
+        </visual>
+
+        <inertial>
+            <mass value="0.10" />
+            <origin xyz="0 0 0" />
+            <inertia ixx="0.00022" iyy="0.00022" izz="0.0040" ixy="0" ixz="0" iyz="0"/>
+        </inertial>
+    </link>
+
+    <!-- ===== RGB-D CAMERA ===== -->
+
+    <!-- Pan joint kept simple (fixed at 0; change to revolute if you want) -->
+    <joint name="rgbd_camera_joint" type="fixed">
+      <parent link="base_link"/>
+      <child link="rgbd_camera_link"/>
+      <origin xyz="0.1 0.0 0.0" rpy="0 0 0"/>
+    </joint>
+
+    <link name="rgbd_camera_link">
       <inertial>
-        <mass value="0.005"/>
-        <inertia ixx="9.75e-07" iyy="4.17041e-05" izz="4.26041e-05" ixy="0" ixz="0" iyz="0"/>
+        <origin xyz="0.0 0 0" rpy="0 0 0"/>
+        <mass value="0.15"/>
+        <inertia ixx="7.5e-05" iyy="7.5e-05" izz="1.2e-04" ixy="0" ixz="0" iyz="0"/>
       </inertial>
       <visual>
-        <geometry>
-          <mesh filename="file://$(find ve_behaviours)/urdf/meshes/${mesh_file}" scale="0.1 0.1 0.1"/>
-        </geometry>
-        <material name="${color}"/>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry><box size="0.02 0.08 0.05"/></geometry>
+        <material name="dark"/>
       </visual>
-      <collision>
-        <geometry>
-          <cylinder radius="0.1" length="0.005"/>
-        </geometry>
-      </collision>
+      <visual>
+        <origin xyz="0.015 0 0" rpy="0 1.57 0"/>
+        <geometry><cylinder length="0.03" radius="0.02"/></geometry>
+        <material name="dark"/>
+      </visual>
     </link>
-    <joint name="${name}_joint" type="continuous">
-      <parent link="base_link"/>
-      <child link="${name}"/>
-      <origin xyz="${xyz}" rpy="${rpy}"/>
-      <axis xyz="0 0 1"/>
+
+    <!-- ROS TF frames for image pipeline -->
+    <joint name="rgbd_camera_frame_joint" type="fixed">
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <parent link="rgbd_camera_link"/>
+      <child link="rgbd_camera_frame"/>
     </joint>
-  </xacro:macro>
+    <link name="rgbd_camera_frame"/>
 
-  <xacro:rotor name="rotor_0" xyz="0.13 -0.22 0.023" rpy="0 0 0" mesh_file="propeller_ccw.dae" color="blue"/>
-  <xacro:rotor name="rotor_1" xyz="-0.13 0.2 0.023" rpy="0 0 0" mesh_file="propeller_ccw.dae" color="red"/>
-  <xacro:rotor name="rotor_2" xyz="0.13 0.22 0.023" rpy="0 0 0" mesh_file="propeller_cw.dae"  color="blue"/>
-  <xacro:rotor name="rotor_3" xyz="-0.13 -0.2 0.023" rpy="0 0 0" mesh_file="propeller_cw.dae"  color="red"/>
-
-  <!-- IMU -->
-  <joint name="imu_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="imu_link"/>
-    <origin xyz="0.0 0 0.068" rpy="0 0 0"/>
-  </joint>
-  <link name="imu_link"/>
-
-  <!-- LiDAR -->
-  <joint name="scan_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="base_scan"/>
-    <origin xyz="0 0 0.06" rpy="0 0 0"/>
-  </joint>
-  <link name="base_scan">
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><cylinder length="0.04" radius="0.09"/></geometry>
-      <material name="dark"/>
-    </visual>
-    <inertial>
-      <mass value="0.10"/>
-      <origin xyz="0 0 0"/>
-      <inertia ixx="0.00022" iyy="0.00022" izz="0.0040" ixy="0" ixz="0" iyz="0"/>
-    </inertial>
-  </link>
-
-  <!-- ===== RGB-D CAMERA (replaces thermal camera) ===== -->
-
-  <!-- Pan joint kept simple (fixed at 0; change to revolute if you want) -->
-  <joint name="rgbd_camera_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="rgbd_camera_link"/>
-    <origin xyz="0.1 0.0 0.0" rpy="0 0 0"/>
-  </joint>
-
-  <link name="rgbd_camera_link">
-    <inertial>
-      <origin xyz="0.0 0 0" rpy="0 0 0"/>
-      <mass value="0.15"/>
-      <inertia ixx="7.5e-05" iyy="7.5e-05" izz="1.2e-04" ixy="0" ixz="0" iyz="0"/>
-    </inertial>
-    <visual>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><box size="0.02 0.08 0.05"/></geometry>
-      <material name="dark"/>
-    </visual>
-    <visual>
-      <origin xyz="0.015 0 0" rpy="0 1.57 0"/>
-      <geometry><cylinder length="0.03" radius="0.02"/></geometry>
-      <material name="dark"/>
-    </visual>
-  </link>
-
-  <!-- ROS TF frames for image pipeline -->
-  <joint name="rgbd_camera_frame_joint" type="fixed">
-    <origin xyz="0 0 0" rpy="0 0 0"/>
-    <parent link="rgbd_camera_link"/>
-    <child link="rgbd_camera_frame"/>
-  </joint>
-  <link name="rgbd_camera_frame"/>
-
-  <!-- Optical frame: Z forward, X right, Y down -->
-  <joint name="rgbd_camera_optical_joint" type="fixed">
-    <origin xyz="0 0 0" rpy="-1.5708 0 -1.5708"/>
-    <parent link="rgbd_camera_frame"/>
-    <child link="rgbd_camera_optical_frame"/>
-  </joint>
-  <link name="rgbd_camera_optical_frame"/>
+    <!-- Optical frame: Z forward, X right, Y down -->
+    <joint name="rgbd_camera_optical_joint" type="fixed">
+      <origin xyz="0 0 0" rpy="-1.5708 0 -1.5708"/>
+      <parent link="rgbd_camera_frame"/>
+      <child link="rgbd_camera_optical_frame"/>
+    </joint>
+    <link name="rgbd_camera_optical_frame"/>
+    
 
 </robot>

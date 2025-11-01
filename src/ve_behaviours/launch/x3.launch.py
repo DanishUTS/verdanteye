@@ -16,7 +16,7 @@ def generate_launch_description():
     pkg_path = FindPackageShare('ve_behaviours')
     bringup_pkg = FindPackageShare('41068_ignition_bringup')
 
-    config_path = PathJoinSubstitution([bringup_pkg,
+    config_x3 = PathJoinSubstitution([bringup_pkg,
                                        'config'])
     
     config_x3 = PathJoinSubstitution([pkg_path,
@@ -64,7 +64,7 @@ def generate_launch_description():
         executable='ekf_node',
         name='robot_localization',
         output='screen',
-        parameters=[PathJoinSubstitution([config_path,
+        parameters=[PathJoinSubstitution([config_x3,
                                           'robot_localization.yaml']),
                     {'use_sim_time': use_sim_time}]
     )
@@ -115,7 +115,7 @@ def generate_launch_description():
         executable='rviz2',
         output='screen',
         parameters=[{'use_sim_time': use_sim_time}],
-        arguments=['-d', PathJoinSubstitution([config_path,
+        arguments=['-d', PathJoinSubstitution([config_x3,
                                                '41068.rviz'])],
         condition=IfCondition(LaunchConfiguration('rviz'))
     )
