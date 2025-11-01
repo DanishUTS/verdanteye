@@ -18,6 +18,9 @@ def generate_launch_description():
 
     config_path = PathJoinSubstitution([bringup_pkg,
                                        'config'])
+    
+    config_x3 = PathJoinSubstitution([pkg_path,
+                                       'config'])
 
     # Additional command line arguments
     use_sim_time_launch_arg = DeclareLaunchArgument(
@@ -92,7 +95,7 @@ def generate_launch_description():
         executable='create',
         output='screen',
         parameters=[{'use_sim_time': use_sim_time}],
-        arguments=['-topic', '/robot_description', '-z', '5.0'] # z is height above ground
+        arguments=['-topic', '/robot_description', '-z', '2.0'] # z is height above ground
     )
     ld.add_action(robot_spawner)
 
@@ -100,7 +103,7 @@ def generate_launch_description():
     gazebo_bridge = Node(
         package='ros_ign_bridge',
         executable='parameter_bridge',
-        parameters=[{'config_file': PathJoinSubstitution([config_path,
+        parameters=[{'config_file': PathJoinSubstitution([config_x3,
                                                           'gazebo_bridge.yaml']),
                     'use_sim_time': use_sim_time}]
     )
@@ -124,10 +127,91 @@ def generate_launch_description():
                               'launch',
                               '41068_navigation.launch.py']),
         launch_arguments={
-            'use_sim_time': use_sim_time
+            'use_sim_time': use_sim_time,
         }.items(),
         condition=IfCondition(LaunchConfiguration('nav2'))
     )
     ld.add_action(nav2)
+
+    depth_to_meters = Node(
+    package='depth_image_proc',
+    executable='convert_metric_node',
+    name='depth_convert_metric',
+    remappings=[
+        ('image_raw', '/X3/rgbd_camera/depth_image'),          # in
+        ('image',     '/X3/rgbd_camera/depth_image_meters')    # out (32FC1 meters)
+    ],
+    parameters=[{'use_sim_time': use_sim_time}]
+    )
+    ld.add_action(depth_to_meters)
+
+    depth_to_scan = Node(
+    package='depthimage_to_laserscan',
+    executable='depthimage_to_laserscan_node',
+    name='depth_to_scan',
+    parameters=[{
+        'output_frame_id': 'base_scan',     # or camera frame if you prefer
+        'range_min': 0.3,
+        'range_max': 8.0,
+        'scan_time': 0.1
+    }],
+    remappings=[
+        ('depth',            '/X3/rgbd_camera/depth_image'),
+        ('depth_camera_info','/X3/rgbd_camera/camera_info'),
+        ('scan',             '/scan')
+    ]
+    )
+    ld.add_action(depth_to_scan)
+
+    # Enable / disable RGB-D SLAM from CLI: slam_rgbd:=true|false
+    slam_rgbd_arg = DeclareLaunchArgument(
+        'slam_rgbd', default_value='True',
+        description='Run RTAB-Map RGB-D SLAM (publishes /map and map->odom)'
+    )
+    ld.add_action(slam_rgbd_arg)
+
+    # 1) RGB+Depth synchronizer
+    rgbd_sync = Node(
+        package='rtabmap_sync',                 # <— was rtabmap_ros
+        executable='rgbd_sync',
+        name='rgbd_sync',
+        output='screen',
+        parameters=[{'use_sim_time': use_sim_time}],
+        remappings=[
+            ('rgb/image',       '/X3/rgbd_camera/image'),
+            ('depth/image',     '/X3/rgbd_camera/depth_image'),
+            ('rgb/camera_info', '/X3/rgbd_camera/camera_info'),
+            ('rgbd_image',      '/rgbd_image')
+        ],
+        condition=IfCondition(LaunchConfiguration('slam_rgbd'))
+    )
+    ld.add_action(rgbd_sync)
+
+    # 2) RTAB-Map SLAM core
+    rtabmap = Node(
+        package='rtabmap_slam',                 # <— was rtabmap_ros
+        executable='rtabmap',
+        name='rtabmap',
+        output='screen',
+        parameters=[
+            {'use_sim_time': use_sim_time},
+            {'frame_id': 'base_link'},
+            {'odom_frame_id': 'odom'},
+            {'map_frame': 'map'},
+            {'subscribe_depth': True},
+            {'approx_sync': True},
+            {'queue_size': 30},
+            {'Grid/FromDepth': 'true'},
+            {'Grid/RangeMax': '12.0'},
+            {'Grid/MinClusterSize': '10'},
+            {'RGBD/LoopClosureReextractFeatures': 'false'},
+            {'Optimizer/Strategy': '1'}
+        ],
+        remappings=[
+            ('rgbd_image', '/rgbd_image')
+        ],
+        condition=IfCondition(LaunchConfiguration('slam_rgbd'))
+    )
+    ld.add_action(rtabmap)
 
     return ld

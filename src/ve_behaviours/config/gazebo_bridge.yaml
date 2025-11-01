@@ -67,3 +67,75 @@
   ros_type_name: "sensor_msgs/msg/PointCloud2"
   gz_type_name: "ignition.msgs.PointCloudPacked"
   direction: GZ_TO_ROS
+
+- topic_name: /camera/image_raw
+  ros_type_name: sensor_msgs/msg/Image
+  gz_type_name: ignition.msgs.Image
+  direction: GZ_TO_ROS
+
+- topic_name: /camera/camera_info
+  ros_type_name: sensor_msgs/msg/CameraInfo
+  gz_type_name: ignition.msgs.CameraInfo
+  direction: GZ_TO_ROS
+
+- topic_name: /camera/depth/image_raw
+  ros_type_name: sensor_msgs/msg/Image
+  gz_type_name: ignition.msgs.Image
+  direction: GZ_TO_ROS
+
+- topic_name: /X3/rgbd_camera/image
+  ros_type_name: sensor_msgs/msg/Image
+  gz_type_name: ignition.msgs.Image
+  direction: GZ_TO_ROS
+
+- topic_name: /X3/rgbd_camera/camera_info
+  ros_type_name: sensor_msgs/msg/CameraInfo
+  gz_type_name: ignition.msgs.CameraInfo
+  direction: GZ_TO_ROS
+
+# Depth image
+- topic_name: /X3/rgbd_camera/depth_image
+  ros_type_name: sensor_msgs/msg/Image
+  gz_type_name: ignition.msgs.Image
+  direction: GZ_TO_ROS
+
+# --- X3 state I/O ---
+# Joint states (from JointStatePublisher plugin in x3.gazebo.xacro)
+- ros_topic_name: /joint_states
+  gz_topic_name: /X3/joint_states
+  ros_type_name: sensor_msgs/msg/JointState
+  gz_type_name: ignition.msgs.Model
+  direction: GZ_TO_ROS
+
+# Odometry (from OdometryPublisher in x3.gazebo.xacro)
+- ros_topic_name: /X3/odometry
+  gz_topic_name: /X3/odometry
+  ros_type_name: nav_msgs/msg/Odometry
+  gz_type_name: ignition.msgs.Odometry
+  direction: GZ_TO_ROS
+
+# IMU (from Sensors/Imu in x3.gazebo.xacro)
+- ros_topic_name: /X3/imu
+  gz_topic_name: /X3/imu
+  ros_type_name: sensor_msgs/msg/Imu
+  gz_type_name: ignition.msgs.IMU
+  direction: GZ_TO_ROS
+
+# Velocity command (MulticopterVelocityControl listens on "cmd_vel" in X3 ns)
+- ros_topic_name: /X3/cmd_vel
+  gz_topic_name: /X3/cmd_vel
+  ros_type_name: geometry_msgs/msg/Twist
+  gz_type_name: ignition.msgs.Twist
+  direction: ROS_TO_GZ
+
+# Lidar: laserscan
+- ros_topic_name: "/X3/scan"
+  ros_type_name: "sensor_msgs/msg/LaserScan"
+  gz_type_name: "gz.msgs.LaserScan"
+  direction: GZ_TO_ROS
+
+# Lidar: pointcloud
+- ros_topic_name: "/X3/scan/points"
+  ros_type_name: "sensor_msgs/msg/PointCloud2"
+  gz_type_name: "gz.msgs.PointCloudPacked"
+  direction: GZ_TO_ROS

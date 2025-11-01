@@ -17,12 +17,20 @@ setup(
             'launch/ui.launch.py',
             'launch/x3.launch.py']),
 
-        ('share/{package_name}/assets', [
+        ('share/' + package_name + '/assets', [
             've_behaviours/assets/VerdantEye.png',
         ]),
         
-        ('share/ve_behaviours/urdf_drone',    glob('urdf_drone/*')),
-        ('share/' + package_name + '/urdf/meshes', glob('urdf/meshes/*')),
+        # URDF / Xacro
+        (os.path.join('share', package_name, 'urdf'),
+         glob('urdf/*.urdf') + glob('urdf/*.xacro') + glob('urdf/*.urdf.xacro')),
+
+        # URDF meshes
+        (os.path.join('share', package_name, 'urdf', 'meshes'),
+         glob('urdf/meshes/*')),
+
+        (os.path.join('share', package_name, 'config'),
+         glob('config/*')),
 
     ],
     install_requires=['setuptools'],
