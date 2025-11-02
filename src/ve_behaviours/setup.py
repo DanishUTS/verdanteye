@@ -14,9 +14,8 @@ setup(
 
         ('share/' + package_name + '/launch', [
             'launch/auto_wander_depth.launch.py',
-            'launch/ui.launch.py',
             'launch/x3.launch.py',
-            'launch/x3_route.launch.py']),
+            'launch/wander_launch.py',]),
 
         ('share/' + package_name + '/assets', [
             've_behaviours/assets/VerdantEye.png',
@@ -44,7 +43,7 @@ setup(
         'console_scripts': [
             'auto_wander_depth = ve_behaviours.auto_wander_depth:main',
             'ui = ve_behaviours.ui:main',
-            'x3_route = ve_behaviours.x3_route:main',
+            'wander_node = ve_behaviours.wander_node:main',
         ],
     },
 )
