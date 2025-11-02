@@ -30,7 +30,6 @@ def _find_logo_path() -> str:
     candidates = [
         here / "VerdantEye.png",
         here.parent / "assets" / "VerdantEye.png",
-        here.parent / "ve_behaviours" / "assets" / "VerdantEye.png",
     ]
 
     # installed location via ament index

@@ -18,7 +18,7 @@ setup(
             'launch/wander_launch.py',]),
 
         ('share/' + package_name + '/assets', [
-            've_behaviours/assets/VerdantEye.png',
+            'assets/VerdantEye.png',
         ]),
         
         # URDF / Xacro
