@@ -16,13 +16,13 @@ class WanderNode(Node):
         super().__init__('ve_wander_node')
 
         # parameters (behaviour + physics)
-        self.declare_parameter('cmd_vel_topic', '/X3/cmd_vel')
-        self.declare_parameter('odom_topic', '/X3/odometry')
-        self.declare_parameter('scan_topic', '/X3/scan')
+        self.declare_parameter('cmd_vel_topic', '/cmd_vel')
+        self.declare_parameter('odom_topic', '/odometry')
+        self.declare_parameter('scan_topic', '/scan')
         self.declare_parameter('use_lidar', True)
         self.declare_parameter('depth_topic', '/X3/depth/image_raw')
         self.declare_parameter('nav_goal_action', '/navigate_to_pose')
-        self.declare_parameter('world_bounds', [-10.0, 10.0, -10.0, 10.0])
+        self.declare_parameter('world_bounds', [-30.0, 30.0, -30.0, 30.0])
         self.declare_parameter('goal_interval_s', 6.0)
         self.declare_parameter('safety_distance', 1.0)
         self.declare_parameter('altitude_setpoint', 2.0)
@@ -36,7 +36,7 @@ class WanderNode(Node):
         self.declare_parameter('alt_feedforward_scale', 0.15) # map N -> cmd units (tune)
         self.declare_parameter('alt_cmd_min', -5.0)
         self.declare_parameter('alt_cmd_max', 12.0)
-        self.declare_parameter('avoid_climb_extra', 1.0)      # extra climb when avoiding
+        self.declare_parameter('avoid_climb_extra', 0.5)      # extra climb when avoiding
 
         # read parameters
         self.cmd_vel_topic = self.get_parameter('cmd_vel_topic').value
@@ -76,7 +76,7 @@ class WanderNode(Node):
         # pubs / subs
         self.pub_cmd = self.create_publisher(Twist, self.cmd_vel_topic, 10)
         self.sub_odom = self.create_subscription(Odometry, self.odom_topic, self.odom_cb, 10)
-        self.sub_imu = self.create_subscription(Imu, '/X3/imu', self.imu_cb, 10)
+        self.sub_imu = self.create_subscription(Imu, '/imu', self.imu_cb, 10)
         if self.use_lidar:
             self.sub_scan = self.create_subscription(LaserScan, self.scan_topic, self.scan_cb, 10)
         else:
