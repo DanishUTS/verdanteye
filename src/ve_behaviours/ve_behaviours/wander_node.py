@@ -10,26 +10,35 @@ import math, random, time
 from tf_transformations import quaternion_from_euler
 import numpy as np
 from cv_bridge import CvBridge
-import cv2
 
 class WanderNode(Node):
     def __init__(self):
         super().__init__('ve_wander_node')
-        # params
+
+        # parameters (behaviour + physics)
         self.declare_parameter('cmd_vel_topic', '/X3/cmd_vel')
         self.declare_parameter('odom_topic', '/X3/odometry')
         self.declare_parameter('scan_topic', '/X3/scan')
         self.declare_parameter('use_lidar', True)
         self.declare_parameter('depth_topic', '/X3/depth/image_raw')
         self.declare_parameter('nav_goal_action', '/navigate_to_pose')
-        self.declare_parameter('world_bounds', [-10.0, 10.0, -10.0, 10.0])  # [xmin,xmax,ymin,ymax]
-        self.declare_parameter('goal_interval_s', 20.0)
-        self.declare_parameter('safety_distance', 1.2)
+        self.declare_parameter('world_bounds', [-10.0, 10.0, -10.0, 10.0])
+        self.declare_parameter('goal_interval_s', 6.0)
+        self.declare_parameter('safety_distance', 1.0)
         self.declare_parameter('altitude_setpoint', 2.0)
-        self.declare_parameter('alt_pid', [1.2, 0.0, 0.2])  # P, I, D
-        self.declare_parameter('max_lin_xy', 0.8)
-        self.declare_parameter('max_ang_z', 0.8)
+        self.declare_parameter('alt_pid', [1.8, 0.01, 0.25])
+        self.declare_parameter('max_lin_xy', 2.0)
+        self.declare_parameter('max_ang_z', 1.6)
 
+        # physics/feedforward params
+        self.declare_parameter('mass', 1.5)                   # kg (estimate)
+        self.declare_parameter('gravity', 9.81)               # m/s^2
+        self.declare_parameter('alt_feedforward_scale', 0.15) # map N -> cmd units (tune)
+        self.declare_parameter('alt_cmd_min', -5.0)
+        self.declare_parameter('alt_cmd_max', 12.0)
+        self.declare_parameter('avoid_climb_extra', 1.0)      # extra climb when avoiding
+
+        # read parameters
         self.cmd_vel_topic = self.get_parameter('cmd_vel_topic').value
         self.odom_topic = self.get_parameter('odom_topic').value
         self.scan_topic = self.get_parameter('scan_topic').value
@@ -44,6 +53,13 @@ class WanderNode(Node):
         self.max_lin_xy = self.get_parameter('max_lin_xy').value
         self.max_ang_z = self.get_parameter('max_ang_z').value
 
+        self.mass = self.get_parameter('mass').value
+        self.gravity = self.get_parameter('gravity').value
+        self.ff_scale = self.get_parameter('alt_feedforward_scale').value
+        self.alt_cmd_min = self.get_parameter('alt_cmd_min').value
+        self.alt_cmd_max = self.get_parameter('alt_cmd_max').value
+        self.avoid_climb_extra = self.get_parameter('avoid_climb_extra').value
+
         # state
         self.current_odom = None
         self.min_scan = float('inf')
@@ -52,7 +68,12 @@ class WanderNode(Node):
         self.last_goal_time = 0.0
         self.nav_busy = False
 
-        # publishers / subscribers
+        # PID variables
+        self.alt_integral = 0.0
+        self.alt_prev_err = 0.0
+        self.last_time = self.get_clock().now()
+
+        # pubs / subs
         self.pub_cmd = self.create_publisher(Twist, self.cmd_vel_topic, 10)
         self.sub_odom = self.create_subscription(Odometry, self.odom_topic, self.odom_cb, 10)
         self.sub_imu = self.create_subscription(Imu, '/X3/imu', self.imu_cb, 10)
@@ -61,13 +82,8 @@ class WanderNode(Node):
         else:
             self.sub_depth = self.create_subscription(Image, self.depth_topic, self.depth_cb, 10)
 
-        # Nav2 action client
+        # nav2 action client
         self.nav_client = ActionClient(self, NavigateToPose, self.nav_goal_action)
-
-        # PID variables for altitude
-        self.alt_integral = 0.0
-        self.alt_prev_err = 0.0
-        self.last_time = self.get_clock().now()
 
         # main timer
         self.create_timer(0.1, self.control_loop)
@@ -97,22 +113,32 @@ class WanderNode(Node):
             self.get_logger().warn(f'depth processing failed: {e}')
             self.min_scan = float('inf')
 
-    # PID altitude control
+    # Altitude control with feedforward
     def altitude_control(self, dt):
+        # feedforward command based on mass * g mapped to cmd units
+        thrust_ff_cmd = self.mass * self.gravity * self.ff_scale
+
         if self.current_odom is None:
-            return 0.0
+            # publish feedforward until odom arrives
+            return max(min(thrust_ff_cmd, self.alt_cmd_max), self.alt_cmd_min)
+
         z = self.current_odom.pose.pose.position.z
         err = self.alt_setpoint - z
         P, I, D = self.alt_pid_gains
-        self.alt_integral += err * dt
-        deriv = (err - self.alt_prev_err) / dt if dt>0 else 0.0
-        out = P*err + I*self.alt_integral + D*deriv
-        self.alt_prev_err = err
-        # clamp vertical thrust (linear.z)
-        out = max(min(out, 2.0), -2.0)
-        return out
 
-    # pick random 2D goal
+        # anti-windup guard
+        if abs(err) > 10.0:
+            self.alt_integral = 0.0
+
+        self.alt_integral += err * dt
+        deriv = (err - self.alt_prev_err) / dt if dt > 0 else 0.0
+        pid_out = P * err + I * self.alt_integral + D * deriv
+        self.alt_prev_err = err
+
+        cmd_vertical = thrust_ff_cmd + pid_out
+        cmd_vertical = max(min(cmd_vertical, self.alt_cmd_max), self.alt_cmd_min)
+        return cmd_vertical
+
     def random_goal_pose(self):
         xmin, xmax, ymin, ymax = self.world_bounds
         x = random.uniform(xmin, xmax)
@@ -128,7 +154,6 @@ class WanderNode(Node):
         pose.pose.orientation = Quaternion(x=q[0], y=q[1], z=q[2], w=q[3])
         return pose
 
-    # send nav2 goal
     def send_nav_goal(self, pose: PoseStamped):
         if not self.nav_client.wait_for_server(timeout_sec=2.0):
             self.get_logger().warn('Nav2 action server not available')
@@ -152,58 +177,50 @@ class WanderNode(Node):
         future.add_done_callback(goal_response_callback)
         return future
 
-    # cancel nav2 goal
     def cancel_nav_goal(self):
-        # attempt to cancel via action client; simplified approach: request cancel on server
         try:
-            # If nav_client had a goal, cancel it by calling cancel on last goal handle if stored
-            # Simpler: publish zero velocity and mark nav_busy False
             self.nav_busy = False
             self.get_logger().info('Cancelling Nav2 goal (soft)')
         except Exception as e:
             self.get_logger().warn(f'cancel failed: {e}')
 
-    # local avoidance: simple reactive turn-away
-    def local_avoidance(self, pub_twist):
+    def local_avoidance(self):
         t = Twist()
-        # stop forward motion
         t.linear.x = 0.0
-        # simple yaw turn until front is clear
+        t.linear.z = self.altitude_control(0.1) + self.avoid_climb_extra
         t.angular.z = self.max_ang_z * 0.8
-        # keep altitude
-        t.linear.z = self.altitude_control(0.1)
-        pub_twist.publish(t)
-        # small sleep to let rotation take effect
+        self.pub_cmd.publish(t)
         rclpy.spin_once(self, timeout_sec=0.5)
 
-    # main control loop
     def control_loop(self):
         now = self.get_clock().now()
         dt = (now - self.last_time).nanoseconds / 1e9 if self.last_time else 0.1
         self.last_time = now
 
-        # emergency checks
+        # small safety checks using IMU
         if self.imu:
             ang_x = abs(self.imu.angular_velocity.x)
             ang_y = abs(self.imu.angular_velocity.y)
+            # reset integral if tilting severely
+            if ang_x > 1.0 or ang_y > 1.0:
+                self.alt_integral = 0.0
 
-        # altitude thrust
-        thrust = self.altitude_control(dt)
+        # compute vertical command
+        thrust_cmd = self.altitude_control(dt)
 
-        # If obstacle too close -> local avoidance
+        # obstacle: climb/back off
         if self.min_scan < self.safety_distance:
             self.get_logger().info(f'obstacle detected at {self.min_scan:.2f} m, doing avoidance')
             t = Twist()
-            t.linear.x = 0.0
-            t.linear.z = thrust
+            t.linear.x = -0.2
+            t.linear.z = min(thrust_cmd + self.avoid_climb_extra, self.alt_cmd_max)
             t.angular.z = self.max_ang_z * 0.6
             self.pub_cmd.publish(t)
-            # cancel nav goal if active
             if self.nav_busy:
                 self.cancel_nav_goal()
             return
 
-        # If Nav2 configured, periodically send Nav2 random goals
+        # periodic nav2 goal
         if (not self.nav_busy) and (time.time() - self.last_goal_time > self.goal_interval):
             pose = self.random_goal_pose()
             self.get_logger().info(f'sending new nav goal x={pose.pose.position.x:.2f} y={pose.pose.position.y:.2f}')
@@ -211,19 +228,19 @@ class WanderNode(Node):
             self.last_goal_time = time.time()
             return
 
-        # If nav busy, we just maintain altitude with small zero velocities
+        # maintain altitude while nav busy
         if self.nav_busy:
             t = Twist()
             t.linear.x = 0.0
-            t.linear.z = thrust
+            t.linear.z = thrust_cmd
             t.angular.z = 0.0
             self.pub_cmd.publish(t)
             return
 
-        # fallback local wander: small forward motion + gentle random yaw
+        # fallback wander
         t = Twist()
-        t.linear.x = 0.4 * self.max_lin_xy
-        t.linear.z = thrust
+        t.linear.x = 0.6 * self.max_lin_xy
+        t.linear.z = thrust_cmd
         t.angular.z = random.uniform(-0.3, 0.3) * self.max_ang_z
         self.pub_cmd.publish(t)
 

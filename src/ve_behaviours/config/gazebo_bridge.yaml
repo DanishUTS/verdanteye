@@ -15,7 +15,7 @@
 
 # Odometry (from OdometryPublisher in x3.gazebo.xacro)
 - ros_topic_name: /odometry
-  gz_topic_name: /model/X3/odometry
+  gz_topic_name: /X3/odometry
   ros_type_name: nav_msgs/msg/Odometry
   gz_type_name: ignition.msgs.Odometry
   direction: GZ_TO_ROS

@@ -1,7 +1,7 @@
 ve_wander_node:
   ros__parameters:
     cmd_vel_topic: "/X3/cmd_vel"
-    odom_topic: "/X3/odom"
+    odom_topic: "/X3/odometry"
     scan_topic: "/X3/scan"
     use_lidar: true
     depth_topic: "/X3/depth/image_raw"
@@ -9,7 +9,7 @@ ve_wander_node:
     world_bounds: [-18.0, 18.0, -18.0, 18.0]
     goal_interval_s: 20.0
     safety_distance: 1.2
-    altitude_setpoint: 2.0
+    altitude_setpoint: 3.0
     alt_pid: [1.2, 0.0, 0.2]
     max_lin_xy: 0.8
     max_ang_z: 0.8
