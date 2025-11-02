@@ -1,3 +1,4 @@
+# file: src/ve_behaviours/setup.py
 from setuptools import setup
 from glob import glob
 import os
@@ -12,26 +13,26 @@ setup(
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
 
+        # ✅ FIXED: added missing comma; bamboo launch file installed correctly
         ('share/' + package_name + '/launch', [
             'launch/auto_wander_depth.launch.py',
             'launch/x3.launch.py',
-            'launch/wander_launch.py',]),
+            'launch/wander_launch.py',
+            'launch/bamboo_randomizer.launch.py',
+        ]),
 
         ('share/' + package_name + '/assets', [
             'assets/VerdantEye.png',
         ]),
-        
-        # URDF / Xacro
+
         (os.path.join('share', package_name, 'urdf'),
          glob('urdf/*.urdf') + glob('urdf/*.xacro') + glob('urdf/*.urdf.xacro')),
 
-        # URDF meshes
         (os.path.join('share', package_name, 'urdf', 'meshes'),
          glob('urdf/meshes/*')),
 
         (os.path.join('share', package_name, 'config'),
          glob('config/*')),
-
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -44,6 +45,7 @@ setup(
             'auto_wander_depth = ve_behaviours.auto_wander_depth:main',
             'ui = ve_behaviours.ui:main',
             'wander_node = ve_behaviours.wander_node:main',
+            'bamboo_randomizer = ve_behaviours.bamboo_randomizer:main',
         ],
     },
 )
