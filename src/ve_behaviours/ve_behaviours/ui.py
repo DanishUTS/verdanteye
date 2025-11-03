@@ -1,213 +1,166 @@
 #!/usr/bin/env python3
-import sys
-import math
+import sys, math, json
 from pathlib import Path
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
-from geometry_msgs.msg import PoseStamped, Twist
+from nav_msgs.msg import Odometry
+from geometry_msgs.msg import Twist
 
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
-    QSpacerItem, QSizePolicy
+    QGridLayout, QFrame
 )
 from PyQt5.QtGui import QPixmap
-from PyQt5.QtCore import QTimer, Qt
+from PyQt5.QtCore import Qt, QTimer
 
-# Try to resolve share directory when installed
-try:
-    from ament_index_python.packages import get_package_share_directory
-except Exception:
-    get_package_share_directory = None
+class GalleryCell(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(6, 6, 6, 6)
+        self.pic = QLabel(); self.pic.setFixedSize(260, 160); self.pic.setAlignment(Qt.AlignCenter)
+        self.caption = QLabel("—"); self.caption.setAlignment(Qt.AlignCenter)
+        self.caption.setStyleSheet("font-size: 14px; color: #cbd5e1;")
+        self.pic.setStyleSheet("background:#111;border:1px solid #333;")
+        lay.addWidget(self.pic); lay.addWidget(self.caption)
 
+    def set_item(self, img_path: str, text: str):
+        if img_path and Path(img_path).exists():
+            pm = QPixmap(img_path).scaled(self.pic.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.pic.setPixmap(pm)
+        else:
+            self.pic.setPixmap(QPixmap())
+        self.caption.setText(text or "—")
 
-def _find_logo_path() -> str:
-    """Find VerdantEye logo both in dev tree and in installed share dir."""
-    here = Path(__file__).resolve().parent
-    # dev-time candidates (run from source)
-    candidates = [
-        here / "VerdantEye.png",
-        here.parent / "assets" / "VerdantEye.png",
-    ]
-
-    # installed location via ament index
-    if get_package_share_directory:
-        try:
-            share = Path(get_package_share_directory("ve_behaviours"))
-            candidates += [
-                share / "assets" / "VerdantEye.png",
-                share / "ve_behaviours" / "assets" / "VerdantEye.png",
-            ]
-        except Exception:
-            pass
-
-    for p in candidates:
-        if p.exists():
-            return str(p)
-    return ""
+    def clear(self):
+        self.set_item("", "—")
 
 class RobotUI(Node):
     def __init__(self):
         super().__init__('ui')
 
-        # ROS pubs / subs
+        # Publishers / services
         self.run_pub = self.create_publisher(Bool, '/ui/run_enabled', 10)
+        # Publish directly to /cmd_vel (no mux required since Nav2 is disabled)
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.restart_cli = self.create_client(Trigger, '/ui/restart')
-        self.pose_sub = self.create_subscription(PoseStamped, '/robot_pose', self.pose_callback, 10)
 
-        self.zero_twist = Twist()
-        self.x = self.y = self.theta = 0.0
+        # Pose from EKF odometry (works even when Nav2 is off)
+        self.pose_sub = self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
 
-        # Qt app / window
+        # Checklist (JSON with image paths + labels) from AutoTargetScan
+        self.create_subscription(String, '/plant_scan/checklist', self.on_checklist, 10)
+
+        # --- Qt setup ---
         self.app = QApplication(sys.argv)
-        self.win = QWidget()
-        self.win.setWindowTitle("VerdantEye Robotics Control")
-        self.win.setStyleSheet("background-color: #000000; color: white;")
-        # wider stays similar, much taller for “length”
-        self.win.setFixedSize(900, 1000)
+        self.window = QWidget(); self.window.setWindowTitle("VerdantEye Robotics Control")
+        self.window.setStyleSheet("background-color:#0b0f12; color:#e5e7eb; font-family:Inter,Arial;")
+        wr = QVBoxLayout(self.window); wr.setContentsMargins(16, 16, 16, 16); wr.setSpacing(18)
 
-        root = QVBoxLayout(self.win)
-        root.setContentsMargins(28, 20, 28, 20)
-        root.setSpacing(14)
+        title = QLabel("VerdantEye Robotics Control"); title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet("font-size: 28px; font-weight: 800; color: #22d3ee;")
+        wr.addWidget(title)
 
-        # ---- Title ----
-        title = QLabel("VerdantEye Robotics Control")
-        title.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
-        title.setStyleSheet("font-size: 34px; font-weight: 800; color: #00e0c6; letter-spacing: 0.5px;")
-        root.addWidget(title)
+        self.label = QLabel("Status: Stopped"); self.label.setAlignment(Qt.AlignCenter)
+        self.label.setStyleSheet("font-size: 22px; color: #ff5555; font-weight: 700;")
+        wr.addWidget(self.label)
 
-        # ---- Logo ----
-        logo = QLabel()
-        logo.setAlignment(Qt.AlignHCenter)
-        logo_path = _find_logo_path()
-        if logo_path:
-            pm = QPixmap(logo_path)
-            if not pm.isNull():
-                # bigger image than before
-                pm = pm.scaled(520, 400, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                logo.setPixmap(pm)
-                self.get_logger().info(f"[UI] Loaded logo: {logo_path}")
-            else:
-                logo.setText("VerdantEye Logo (unsupported format)")
-                logo.setStyleSheet("font-size: 16px; color: #AAAAAA;")
-        else:
-            logo.setText("VerdantEye Logo Missing")
-            logo.setStyleSheet("font-size: 16px; color: #AAAAAA;")
-        root.addWidget(logo)
-
-        # ---- Status ----
-        self.label = QLabel("Status: Stopped")
-        self.label.setAlignment(Qt.AlignHCenter)
-        self.label.setStyleSheet("font-size: 26px; color: #ff5555; font-weight: 700; padding-top: 4px;")
-        root.addWidget(self.label)
-
-        # ---- Coordinates ----
         self.coords = QLabel("Position: (x=0.00, y=0.00, θ=0.00)")
-        self.coords.setAlignment(Qt.AlignHCenter)
-        self.coords.setStyleSheet("font-size: 20px; color: #9aa0a6; padding-bottom: 12px;")
-        root.addWidget(self.coords)
+        self.coords.setStyleSheet("font-size: 14px; color:#a1a1aa;")
+        self.coords.setAlignment(Qt.AlignCenter)
+        wr.addWidget(self.coords)
 
-        # thin separator line
-        sep = QLabel("")
-        sep.setFixedHeight(2)
-        sep.setStyleSheet("background-color: #00a092;")
-        root.addWidget(sep)
+        row = QHBoxLayout(); wr.addLayout(row)
 
-        # ---- Buttons row (left column style on the SAME page) ----
-        # We put buttons in a small left-side column and add stretch on the right
-        row = QHBoxLayout()
-        row.setSpacing(18)
-
-        buttons_col = QVBoxLayout()
-        buttons_col.setSpacing(12)
-
-        btn_style = (
-            "font-size: 18px; font-weight: 700; color: white; "
-            "padding: 10px 18px; border-radius: 10px;"
-        )
-        # Smaller, squarer buttons
+        buttons_col = QVBoxLayout(); buttons_col.setSpacing(12)
+        btn_style = ("font-size: 18px; font-weight: 700; color: white; padding: 10px 18px; border-radius: 10px;")
         btn_w, btn_h = 190, 54
 
-        self.btn_start = QPushButton("▶ START")
-        self.btn_start.setFixedSize(btn_w, btn_h)
+        self.btn_start = QPushButton("▶ START"); self.btn_start.setFixedSize(btn_w, btn_h)
         self.btn_start.setStyleSheet(btn_style + "background-color: #10b981;")
-        self.btn_start.clicked.connect(self.on_start)
-        buttons_col.addWidget(self.btn_start, alignment=Qt.AlignLeft)
+        self.btn_start.clicked.connect(self.on_start); buttons_col.addWidget(self.btn_start, alignment=Qt.AlignLeft)
 
-        self.btn_stop = QPushButton("⏹ STOP")
-        self.btn_stop.setFixedSize(btn_w, btn_h)
+        self.btn_stop = QPushButton("⏹ STOP"); self.btn_stop.setFixedSize(btn_w, btn_h)
         self.btn_stop.setStyleSheet(btn_style + "background-color: #ef4444;")
-        self.btn_stop.clicked.connect(self.on_stop)
-        buttons_col.addWidget(self.btn_stop, alignment=Qt.AlignLeft)
+        self.btn_stop.clicked.connect(self.on_stop); buttons_col.addWidget(self.btn_stop, alignment=Qt.AlignLeft)
 
-        self.btn_restart = QPushButton("🔁 RESTART")
-        self.btn_restart.setFixedSize(btn_w, btn_h)
+        self.btn_restart = QPushButton("🔁 RESTART"); self.btn_restart.setFixedSize(btn_w, btn_h)
         self.btn_restart.setStyleSheet(btn_style + "background-color: #3b82f6;")
-        self.btn_restart.clicked.connect(self.on_restart)
-        buttons_col.addWidget(self.btn_restart, alignment=Qt.AlignLeft)
+        self.btn_restart.clicked.connect(self.on_restart); buttons_col.addWidget(self.btn_restart, alignment=Qt.AlignLeft)
 
-        self.btn_close = QPushButton("❌ CLOSE")
-        self.btn_close.setFixedSize(btn_w, btn_h)
+        self.btn_close = QPushButton("❌ CLOSE"); self.btn_close.setFixedSize(btn_w, btn_h)
         self.btn_close.setStyleSheet(btn_style + "background-color: #6b7280;")
-        self.btn_close.clicked.connect(self.on_close)
-        buttons_col.addWidget(self.btn_close, alignment=Qt.AlignLeft)
+        self.btn_close.clicked.connect(self.on_close); buttons_col.addWidget(self.btn_close, alignment=Qt.AlignLeft)
 
-        # left column goes in the row, right side left empty for future widgets
         row.addLayout(buttons_col)
-        row.addStretch(1)  # keeps buttons “hanging” on the left wall
 
-        root.addLayout(row)
+        gallery_wrap = QVBoxLayout()
+        glabel = QLabel("Plant Checklist"); glabel.setAlignment(Qt.AlignLeft)
+        glabel.setStyleSheet("font-size:20px;color:#a7f3d0;")
+        gallery_wrap.addWidget(glabel)
 
-        # bottom stretch so there’s breathing room when tall
-        root.addStretch(1)
+        self.grid = QGridLayout(); self.grid.setHorizontalSpacing(12); self.grid.setVerticalSpacing(12)
+        self.cells: list[GalleryCell] = []
+        for i in range(2):
+            for j in range(3):
+                cell = GalleryCell(); self.grid.addWidget(cell, i, j); self.cells.append(cell)
+        gallery_wrap.addLayout(self.grid)
+        row.addLayout(gallery_wrap, stretch=1)
 
-        self.win.show()
+        self.window.resize(1100, 720)
+        self.window.show()
 
-        # ROS spin timer
-        self.timer = QTimer()
-        self.timer.timeout.connect(self._safe_spin)
-        self.timer.start(10)
+        self.items = []
+        self.x = self.y = self.theta = 0.0
 
-    # ---- ROS Callbacks / actions ----
-    def pose_callback(self, msg: PoseStamped):
-        self.x = msg.pose.position.x
-        self.y = msg.pose.position.y
-        q = msg.pose.orientation
-        siny_cosp = 2 * (q.w * q.z + q.x * q.y)
-        cosy_cosp = 1 - 2 * (q.y*q.y + q.z*q.z)
-        self.theta = math.atan2(siny_cosp, cosy_cosp)
-        self.coords.setText(f"Position: (x={self.x:.2f}, y={self.y:.2f}, θ={self.theta:.2f})")
+        # Redraw timer to keep Qt responsive alongside rclpy
+        self.timer = QTimer(); self.timer.timeout.connect(self._safe_spin); self.timer.start(10)
+
+    # ------------- ROS callbacks -------------
+    def on_checklist(self, msg: String):
+        try:
+            data = json.loads(msg.data or "{}")
+        except Exception:
+            return
+        self.items = data.get("items", [])
+        for i in range(6):
+            if i < len(self.items):
+                it = self.items[i]
+                label = f"#{i+1}  {it.get('color','?').upper()}  {it.get('condition','?')}\n" \
+                        f"({it.get('pose',{}).get('x','?')},{it.get('pose',{}).get('y','?')})  conf={it.get('confidence',0)}"
+                self.cells[i].set_item(it.get('image_path',"") or "", label)
+            else:
+                self.cells[i].clear()
 
     def on_start(self):
         self.run_pub.publish(Bool(data=True))
-        self.label.setText("Status: Running")
-        self.label.setStyleSheet("font-size: 26px; color: #22ff88; font-weight: 700;")
+        self.label.setText("Status: Running"); self.label.setStyleSheet("font-size: 22px; color: #10b981; font-weight: 700;")
 
     def on_stop(self):
         self.run_pub.publish(Bool(data=False))
-        self.cmd_pub.publish(self.zero_twist)
-        self.label.setText("Status: Stopped")
-        self.label.setStyleSheet("font-size: 26px; color: #ff5555; font-weight: 700;")
+        self.cmd_pub.publish(Twist())
+        self.label.setText("Status: Stopped"); self.label.setStyleSheet("font-size: 22px; color: #ff5555; font-weight: 700;")
 
     def on_restart(self):
-        self.label.setText("Status: Restarting…")
-        self.label.setStyleSheet("font-size: 26px; color: #66a3ff; font-weight: 700;")
-        if not self.restart_cli.service_is_ready():
-            self.restart_cli.wait_for_service(timeout_sec=3.0)
-        fut = self.restart_cli.call_async(Trigger.Request())
-        fut.add_done_callback(self._after_restart)
+        if self.restart_cli.wait_for_service(timeout_sec=1.0):
+            try:
+                from std_srvs.srv import Trigger
+                fut = self.restart_cli.call_async(Trigger.Request())
+                rclpy.spin_until_future_complete(self, fut, timeout_sec=2.0)
+            except Exception:
+                pass
 
-    def _after_restart(self, fut):
-        try:
-            result = fut.result()
-            self.get_logger().info(f"Restart: {result.message}")
-        except Exception as e:
-            self.get_logger().warn(f"Restart service error: {e}")
-        self.label.setText("Status: Stopped")
-        self.label.setStyleSheet("font-size: 26px; color: #ff5555; font-weight: 700;")
+    def odom_callback(self, msg: Odometry):
+        p = msg.pose.pose.position
+        q = msg.pose.pose.orientation
+        siny_cosp = 2 * (q.w * q.z + q.x * q.y)
+        cosy_cosp = 1 - 2 * (q.y*q.y + q.z*q.z)
+        theta = math.atan2(siny_cosp, cosy_cosp)
+        self.x, self.y, self.theta = float(p.x), float(p.y), float(theta)
+        self.coords.setText(f"Position: (x={self.x:.2f}, y={self.y:.2f}, θ={self.theta:.2f})")
 
     def _safe_spin(self):
         if rclpy.ok():
@@ -215,27 +168,18 @@ class RobotUI(Node):
 
     def on_close(self):
         self.get_logger().info("🛑 Shutting down VerdantEye UI...")
-        self.app.quit()
-        self.destroy_node()
-        rclpy.shutdown()
-        sys.exit(0)
-
+        self.app.quit(); self.destroy_node(); rclpy.shutdown(); sys.exit(0)
 
 def main():
     rclpy.init()
     ui = RobotUI()
-
     def on_exit():
-        ui.destroy_node()
-        rclpy.shutdown()
-
+        ui.destroy_node(); rclpy.shutdown()
     ui.app.aboutToQuit.connect(on_exit)
     try:
         sys.exit(ui.app.exec_())
     except KeyboardInterrupt:
         on_exit()
 
-
 if __name__ == '__main__':
     main()
-

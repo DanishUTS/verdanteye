@@ -13,7 +13,7 @@ setup(
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
 
-        # ✅ FIXED: added missing comma; bamboo launch file installed correctly
+        # ✅ bamboo + other launch files
         ('share/' + package_name + '/launch', [
             'launch/auto_wander_depth.launch.py',
             'launch/x3.launch.py',
@@ -46,6 +46,9 @@ setup(
             'ui = ve_behaviours.ui:main',
             'wander_node = ve_behaviours.wander_node:main',
             'bamboo_randomizer = ve_behaviours.bamboo_randomizer:main',
+
+            # NEW: separate checklist/gallery UI (only if you keep ui_plants.py)
+            'ui_plants = ve_behaviours.ui_plants:main',
         ],
     },
 )

@@ -1,307 +1,238 @@
 #!/usr/bin/env python3
-import math
-import time
-import random
-import numpy as np
+# ===============================================================
+# VerdantEye: AutoTargetScan (Nav2 version)
+# - Uses Nav2 /navigate_to_pose for movement (not /cmd_vel)
+# - Automatically visits bamboo targets from randomizer
+# - Scans & classifies at each location
+# ===============================================================
+from __future__ import annotations
+import os, math, json, time
+from dataclasses import dataclass
+from typing import List, Optional
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
-from rclpy.qos import QoSOverridingOptions, QoSPolicyKind
+from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
+from rclpy.action import ActionClient
 
+import numpy as np
+import cv2
 from cv_bridge import CvBridge
+
+from geometry_msgs.msg import PoseArray, PoseStamped
 from sensor_msgs.msg import Image
-from geometry_msgs.msg import Twist, PoseStamped, PoseWithCovarianceStamped
-from visualization_msgs.msg import Marker
-from std_msgs.msg import Bool
+from std_msgs.msg import String, Bool
 from std_srvs.srv import Trigger
-from ros_gz_interfaces.srv import SetEntityPose  # ros_gz
+from nav2_msgs.action import NavigateToPose
 
-def sensor_qos():
-    # Equivalent to SensorDataQoS but explicit (so it’s easy to tweak)
-    return QoSProfile(
-        reliability=ReliabilityPolicy.BEST_EFFORT,
-        durability=DurabilityPolicy.VOLATILE,
-        history=HistoryPolicy.KEEP_LAST,
-        depth=1,
-    )
 
-class AutoWanderDepth(Node):
-    def __init__(self):
-        super().__init__('auto_wander_depth')
+@dataclass
+class Target:
+    x: float
+    y: float
+    z: float = 0.0
+    name: Optional[str] = None
 
-        # ------------ Parameters ------------
-        self.declare_parameter('cmd_vel_topic', 'cmd_vel')
-        self.declare_parameter('depth_topic', '/camera/depth/image')
-        self.declare_parameter('linear_speed', 0.30)
-        self.declare_parameter('angular_speed', 0.60)
-        self.declare_parameter('min_range', 0.50)
-        self.declare_parameter('wall_buffer', 0.70)
-        self.declare_parameter('world_name', 'large_demo')   # for teleport
-        self.declare_parameter('entity_name', 'husky')       # gazebo entity
 
-        self.cmd_vel_topic = self.get_parameter('cmd_vel_topic').value
-        self.depth_topic = self.get_parameter('depth_topic').value
-        self.linear_speed = float(self.get_parameter('linear_speed').value)
-        self.angular_speed = float(self.get_parameter('angular_speed').value)
-        self.min_range = float(self.get_parameter('min_range').value)
-        self.wall_buffer = float(self.get_parameter('wall_buffer').value)
-        self.world_name = str(self.get_parameter('world_name').value)
-        self.entity_name = str(self.get_parameter('entity_name').value)
+class AutoTargetScan(Node):
+    def __init__(self) -> None:
+        super().__init__("auto_wander_nav2")
 
-        # ------------ Pub/Sub ------------
-        self.cmd_pub = self.create_publisher(Twist, self.cmd_vel_topic, 10)
-        self.pose_pub = self.create_publisher(PoseStamped, "robot_pose", 10)
-        self.marker_pub = self.create_publisher(Marker, "obstacle_markers", 10)
-        self.initialpose_pub = self.create_publisher(PoseWithCovarianceStamped, '/initialpose', 10)
+        # --- Parameters ---
+        self.declare_parameter("scan_time_sec", 5.0)
+        self.declare_parameter("scans_dir", os.path.expanduser("~/.ros/plant_scans"))
+        self.declare_parameter("world_name", "large_demo")
+        self.declare_parameter("entity_name", "husky")
 
-        # Depth with sensor QoS (prevents message filter spam)
-        self.depth_sub = self.create_subscription(
-            Image, self.depth_topic, self.depth_callback, sensor_qos()
-        )
+        self.scan_time_sec = float(self.get_parameter("scan_time_sec").value)
+        self.scans_dir = str(self.get_parameter("scans_dir").value)
+        os.makedirs(self.scans_dir, exist_ok=True)
 
-        # UI
-        self.run_enabled = False
-        self.ui_run_sub = self.create_subscription(Bool, '/ui/run_enabled', self._ui_run_cb, 10)
-        self.restart_srv = self.create_service(Trigger, '/ui/restart', self._handle_restart)
+        # --- ROS interfaces ---
+        qos_targets = QoSProfile(depth=1)
+        qos_targets.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        qos_targets.reliability = ReliabilityPolicy.RELIABLE
 
-        # ------------ State ------------
+        self.create_subscription(PoseArray, "/bamboo/targets", self.on_targets, qos_targets)
+        self.create_subscription(Bool, "/ui/run_enabled", self.on_run_enabled, 10)
+        self.create_subscription(Image, "/camera/color/image_raw", self.on_rgb, 10)
+
+        self.pub_ui = self.create_publisher(Image, "/plant_scan/ui", 1)
+        self.pub_list = self.create_publisher(String, "/plant_scan/checklist", 1)
+
+        self.srv_restart = self.create_service(Trigger, "/ui/restart", self.on_restart)
         self.bridge = CvBridge()
-        self.latest_depth = None
-        self.latest_depth_stamp = 0.0
 
-        # Dead-reckon pose (for UI)
-        self.x = 0.0; self.y = 0.0; self.theta = 0.0
-        self.last_time = time.time()
-
-        # Spawn pose (latched)
-        self.spawn_x = 0.0; self.spawn_y = 0.0; self.spawn_theta = 0.0
-        self.spawn_set = False
-
-        # Steering smoothing
-        self._last_ang = 0.0
-        self._ang_lowpass = 0.35  # 0..1 (higher = snappier)
-
-        # Teleport client (persistent)
-        self._teleport_srv_name = f'/world/{self.world_name}/set_entity_pose'
-        self._teleport_cli = self.create_client(SetEntityPose, self._teleport_srv_name)
-
-        # Throttle markers
-        self._marker_every = 5
-        self._tick = 0
-
-        # Wait for first depth before starting the control timer
-        self._control_period = 0.1
-        self._wait_timer = self.create_timer(0.2, self._wait_for_depth)
-        self._control_timer = None
-
-        self.get_logger().info(f"🚀 AutoWanderDepth ready (depth: {self.depth_topic}, cmd: {self.cmd_vel_topic})")
-
-    # ---------------- UI ----------------
-    def _ui_run_cb(self, msg: Bool):
-        self.run_enabled = bool(msg.data)
-        if not self.run_enabled:
-            self.cmd_pub.publish(Twist())
-            self.get_logger().info("🛑 Robot stopped by UI.")
-        else:
-            self.get_logger().info("▶️ Robot started by UI.")
-
-    def _handle_restart(self, request, response):
-        self.get_logger().info("🔁 Restart requested — stopping, resetting pose, teleporting…")
+        # --- State ---
+        self.rgb = None
+        self.targets_raw: List[Target] = []
+        self.plan: List[Target] = []
+        self.current: Optional[Target] = None
+        self.results: List[dict] = []
+        self.state = "IDLE"
         self.run_enabled = False
-        self.cmd_pub.publish(Twist())
 
-        # Re-seed pose for SLAM
-        init = PoseWithCovarianceStamped()
-        init.header.stamp = self.get_clock().now().to_msg()
-        init.header.frame_id = "map"
-        init.pose.pose.position.x = self.spawn_x
-        init.pose.pose.position.y = self.spawn_y
-        init.pose.pose.orientation.z = math.sin(self.spawn_theta / 2.0)
-        init.pose.pose.orientation.w = math.cos(self.spawn_theta / 2.0)
-        init.pose.covariance[0] = 0.04
-        init.pose.covariance[7] = 0.04
-        init.pose.covariance[35] = 0.02
-        self.initialpose_pub.publish(init)
+        # --- Nav2 Action Client ---
+        self.nav_client = ActionClient(self, NavigateToPose, "navigate_to_pose")
 
-        # Optional: clear SLAM map if service exists
+        self.create_timer(0.5, self.loop)
+        self.get_logger().info("🌿 AutoTargetScan (Nav2 version) ready.")
+
+    # -------------------------------------------------------------
+    # Callbacks
+    # -------------------------------------------------------------
+    def on_run_enabled(self, msg: Bool) -> None:
+        self.run_enabled = msg.data
+        self.get_logger().info(f"/ui/run_enabled = {self.run_enabled}")
+        if self.run_enabled and self.targets_raw:
+            self.plan_from_current_pose()
+            self.state = "MOVE"
+        else:
+            self.state = "IDLE"
+
+    def on_targets(self, msg: PoseArray) -> None:
+        self.targets_raw = [Target(p.position.x, p.position.y, p.position.z) for p in msg.poses]
+        self.get_logger().info(f"Received {len(self.targets_raw)} targets from randomizer.")
+
+    def on_rgb(self, msg: Image) -> None:
         try:
-            from std_srvs.srv import Empty
-            clear_cli = self.create_client(Empty, '/slam_toolbox/clear')
-            if clear_cli.wait_for_service(timeout_sec=1.0):
-                clear_cli.call_async(Empty.Request())
+            self.rgb = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+        except Exception:
+            self.rgb = None
+
+    def on_restart(self, _req: Trigger.Request, _ctx=None) -> Trigger.Response:
+        self.run_enabled = False
+        self.state = "IDLE"
+        self.plan.clear()
+        self.current = None
+        self.results.clear()
+        self.get_logger().info("Scanner reset.")
+        return Trigger.Response(success=True, message="Restarted.")
+
+    # -------------------------------------------------------------
+    # Planning
+    # -------------------------------------------------------------
+    def plan_from_current_pose(self) -> None:
+        if not self.targets_raw:
+            self.plan = []
+            self.state = "WAITING_FOR_TARGETS"
+            return
+
+        ordered = self.targets_raw.copy()
+        self.plan = ordered
+        self.current = None
+
+    # -------------------------------------------------------------
+    # Main loop
+    # -------------------------------------------------------------
+    def loop(self) -> None:
+        self.render_ui()
+        if not self.run_enabled:
+            return
+        if self.state == "MOVE":
+            if self.current is None and self.plan:
+                self.current = self.plan.pop(0)
+                self.send_nav_goal(self.current.x, self.current.y)
+            elif self.current is None and not self.plan:
+                self.state = "DONE"
+        elif self.state == "SCAN":
+            # Wait few seconds to simulate scanning
+            self.analyze_scene_and_save()
+            self.current = None
+            self.state = "MOVE" if self.plan else "DONE"
+        elif self.state == "DONE":
+            self.publish_checklist()
+
+    # -------------------------------------------------------------
+    # Nav2 control
+    # -------------------------------------------------------------
+    def send_nav_goal(self, gx: float, gy: float) -> None:
+        if not self.nav_client.wait_for_server(timeout_sec=2.0):
+            self.get_logger().warn("Nav2 navigate_to_pose not available!")
+            return
+
+        goal = NavigateToPose.Goal()
+        goal.pose = PoseStamped()
+        goal.pose.header.frame_id = "map"
+        goal.pose.header.stamp = self.get_clock().now().to_msg()
+        goal.pose.pose.position.x = gx
+        goal.pose.pose.position.y = gy
+        goal.pose.pose.orientation.w = 1.0
+
+        self.get_logger().info(f"Sending Nav2 goal to ({gx:.2f}, {gy:.2f})")
+
+        send_future = self.nav_client.send_goal_async(goal)
+        send_future.add_done_callback(self._on_goal_sent)
+
+    def _on_goal_sent(self, future):
+        goal_handle = future.result()
+        if not goal_handle.accepted:
+            self.get_logger().warn("Nav2 goal rejected.")
+            return
+        self.get_logger().info("Nav2 goal accepted.")
+        result_future = goal_handle.get_result_async()
+        result_future.add_done_callback(self._on_goal_result)
+
+    def _on_goal_result(self, future):
+        result = future.result().result
+        self.get_logger().info("✅ Nav2 reached goal, starting scan...")
+        self.state = "SCAN"
+
+    # -------------------------------------------------------------
+    # Scanning / Classification
+    # -------------------------------------------------------------
+    def analyze_scene_and_save(self) -> None:
+        if self.rgb is None:
+            label, conf, path = "green", 0.0, ""
+        else:
+            hsv = cv2.cvtColor(self.rgb, cv2.COLOR_BGR2HSV)
+            green = cv2.inRange(hsv, np.array([35, 60, 60]), np.array([85, 255, 255]))
+            red = cv2.inRange(hsv, np.array([0, 90, 60]), np.array([10, 255, 255])) | \
+                  cv2.inRange(hsv, np.array([170, 90, 60]), np.array([180, 255, 255]))
+            g_area, r_area = int(np.count_nonzero(green)), int(np.count_nonzero(red))
+            total = g_area + r_area or 1
+            label = "red" if r_area > g_area else "green"
+            conf = max(r_area, g_area) / float(total)
+            idx = len(self.results) + 1
+            path = os.path.join(self.scans_dir, f"{idx:02d}_{label}.png")
+            cv2.imwrite(path, self.rgb)
+
+        entry = {
+            "id": len(self.results) + 1,
+            "color": label,
+            "confidence": round(float(conf), 3),
+            "condition": "toxic" if label == "red" else "healthy",
+            "image_path": path,
+            "notes": f"{label} dominance {round(conf*100)}%"
+        }
+        self.results.append(entry)
+        self.publish_checklist()
+
+    def publish_checklist(self) -> None:
+        msg = {"visited": len(self.results), "items": self.results}
+        self.pub_list.publish(String(data=json.dumps(msg)))
+
+    def render_ui(self) -> None:
+        canvas = np.full((360, 480, 3), (25, 25, 25), dtype=np.uint8)
+        cv2.putText(canvas, f"STATE: {self.state}", (16, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
+        cv2.putText(canvas, f"Visited: {len(self.results)}", (16, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (180,180,180), 1)
+        try:
+            self.pub_ui.publish(self.bridge.cv2_to_imgmsg(canvas, "bgr8"))
         except Exception:
             pass
 
-        # Teleport in Gazebo
-        if not self._teleport_cli.wait_for_service(timeout_sec=2.0):
-            self.get_logger().error(f"❌ Teleport service unavailable: {self._teleport_srv_name}")
-        else:
-            req = SetEntityPose.Request()
-            req.pose.name = self.entity_name
-            req.pose.position.x = float(self.spawn_x)
-            req.pose.position.y = float(self.spawn_y)
-            req.pose.position.z = 0.25
-            req.pose.orientation.w = math.cos(self.spawn_theta / 2.0)
-            req.pose.orientation.z = math.sin(self.spawn_theta / 2.0)
 
-            fut = self._teleport_cli.call_async(req)
-            rclpy.spin_until_future_complete(self, fut, timeout_sec=2.0)
-            ok = (fut.result() is not None and getattr(fut.result(), "success", False))
-            self.get_logger().info("✅ Teleport OK." if ok else "⚠️ Teleport failed/timed out.")
-
-        response.success = True
-        response.message = "Restart complete."
-        return response
-
-    # -------------- Depth --------------
-    def depth_callback(self, msg: Image):
-        try:
-            # Expecting 32FC1 or 16UC1; handle both
-            if msg.encoding in ("32FC1", "32FC"):
-                depth = self.bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
-                depth = np.asarray(depth, dtype=np.float32)
-            elif msg.encoding in ("16UC1", "mono16"):
-                raw = self.bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough").astype(np.float32)
-                depth = raw * 0.001  # mm->m
-            else:
-                # Fallback (best effort)
-                depth = self.bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough").astype(np.float32)
-
-            # Sanitize and clamp
-            depth = np.nan_to_num(depth, nan=10.0, posinf=10.0, neginf=10.0)
-            depth = np.clip(depth, 0.0, 20.0)
-
-            self.latest_depth = depth
-            self.latest_depth_stamp = self.get_clock().now().nanoseconds * 1e-9
-        except Exception as e:
-            self.get_logger().warn(f"Depth conversion failed: {e}")
-
-    # -------- Helpers / publishing ------
-    def publish_pose(self, twist: Twist):
-        now = time.time()
-        dt = now - self.last_time
-        self.last_time = now
-
-        self.x += twist.linear.x * math.cos(self.theta) * dt
-        self.y += twist.linear.x * math.sin(self.theta) * dt
-        self.theta += twist.angular.z * dt
-
-        if not self.spawn_set and (abs(self.x) + abs(self.y) > 1e-5):
-            self.spawn_x, self.spawn_y, self.spawn_theta = self.x, self.y, self.theta
-            self.spawn_set = True
-            self.get_logger().info(f"📍 Spawn recorded at x={self.spawn_x:.2f}, y={self.spawn_y:.2f}, θ={self.spawn_theta:.2f}")
-
-        pose_msg = PoseStamped()
-        pose_msg.header.stamp = self.get_clock().now().to_msg()
-        pose_msg.header.frame_id = "map"
-        pose_msg.pose.position.x = self.x
-        pose_msg.pose.position.y = self.y
-        pose_msg.pose.orientation.z = math.sin(self.theta / 2.0)
-        pose_msg.pose.orientation.w = math.cos(self.theta / 2.0)
-        self.pose_pub.publish(pose_msg)
-
-    def publish_obstacle_marker(self, distance, angle, idx):
-        # Throttle to reduce RViz load
-        if self._tick % self._marker_every != 0:
-            return
-        m = Marker()
-        m.header.stamp = self.get_clock().now().to_msg()
-        m.header.frame_id = "base_link"
-        m.ns = "obstacles"
-        m.id = idx
-        m.type = Marker.SPHERE
-        m.action = Marker.ADD
-        m.pose.position.x = distance * math.cos(angle)
-        m.pose.position.y = distance * math.sin(angle)
-        m.pose.position.z = 0.2
-        m.scale.x = m.scale.y = m.scale.z = 0.20
-        m.color.r, m.color.g, m.color.b, m.color.a = 1.0, 0.0, 0.0, 1.0
-        self.marker_pub.publish(m)
-
-    # -------------- Control --------------
-    def _wait_for_depth(self):
-        # Don’t start control until we’ve seen one fresh frame
-        if self.latest_depth is None:
-            return
-        # Also ensure its timestamp is “recent” in sim time
-        if (self.get_clock().now().nanoseconds * 1e-9) - self.latest_depth_stamp > 1.0:
-            return
-
-        # Start control loop now that stream is alive
-        self.destroy_timer(self._wait_timer)
-        self._control_timer = self.create_timer(self._control_period, self.control_loop)
-        self.get_logger().info("🎥 Depth stream detected — control loop started.")
-
-    def control_loop(self):
-        self._tick += 1
-
-        # Always publish zero if paused
-        if not self.run_enabled:
-            self.cmd_pub.publish(Twist())
-            return
-
-        # Require valid & recent depth
-        if self.latest_depth is None:
-            return
-        if (self.get_clock().now().nanoseconds * 1e-9) - self.latest_depth_stamp > 1.0:
-            # stale frame (Gazebo hiccup) — don’t move this tick
-            self.cmd_pub.publish(Twist())
-            return
-
-        depth = self.latest_depth
-        h, w = depth.shape
-        h1, h2 = h // 3, 2 * h // 3
-        w1, w2 = w // 3, 2 * w // 3
-
-        left   = depth[h1:h2, :w1]
-        center = depth[h1:h2, w1:w2]
-        right  = depth[h1:h2, w2:]
-
-        min_left   = float(np.min(left))
-        min_center = float(np.min(center))
-        min_right  = float(np.min(right))
-
-        # Basic reactive logic with smoothing and wall bias
-        cmd = Twist()
-
-        if min_center < self.min_range and min_left < self.min_range and min_right < self.min_range:
-            # Tight box ahead — reverse and turn
-            cmd.linear.x = -0.20
-            target_ang = self.angular_speed
-        elif min_center < self.min_range:
-            # Obstacle ahead — turn toward the freer side
-            target_ang = self.angular_speed if min_left > min_right else -self.angular_speed
-        else:
-            # Free — go forward, nudge away from close wall
-            cmd.linear.x = self.linear_speed
-            if min_left < self.wall_buffer and min_right >= self.wall_buffer:
-                target_ang = -0.30
-            elif min_right < self.wall_buffer and min_left >= self.wall_buffer:
-                target_ang = 0.30
-            else:
-                target_ang = 0.0
-
-        # Low-pass filter on angular velocity to prevent oscillations
-        alpha = self._ang_lowpass
-        cmd.angular.z = alpha * target_ang + (1.0 - alpha) * self._last_ang
-        self._last_ang = cmd.angular.z
-
-        self.cmd_pub.publish(cmd)
-        self.publish_pose(cmd)
-        self.publish_obstacle_marker(min_center, 0.0, 0)
-        self.publish_obstacle_marker(min_left,  math.pi/4, 1)
-        self.publish_obstacle_marker(min_right, -math.pi/4, 2)
-
-def main():
+def main() -> None:
     rclpy.init()
-    node = AutoWanderDepth()
+    node = AutoTargetScan()
     try:
         rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
     finally:
-        node.cmd_pub.publish(Twist())  # brake on exit
         node.destroy_node()
         rclpy.shutdown()
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()
