@@ -3,8 +3,9 @@
 # VerdantEye: AutoTargetScan (Nav2 event-driven, camera-based scan)
 # - Uses Husky RGB camera to classify each plant (red / green)
 # - Faces the plant at the scan point (Nav2 goal yaw)
-# - Non-blocking scan that waits for real camera frames
-# - Logs bamboo + scan coordinates and camera status
+# - Non-blocking timed scan (no time.sleep)
+# - Keeps bamboo targets across "Restart" & logs coordinates
+# - NEW: Explicit switch — LiDAR nav for MOVE, cancel goal for SCAN
 # ===============================================================
 
 from __future__ import annotations
@@ -15,12 +16,7 @@ from typing import List, Optional, Tuple
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
-from rclpy.qos import (
-    QoSProfile,
-    DurabilityPolicy,
-    ReliabilityPolicy,
-    qos_profile_sensor_data,   # <- for camera images
-)
+from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from action_msgs.msg import GoalStatus
 
 import numpy as np
@@ -74,12 +70,7 @@ class AutoTargetScan(Node):
 
         self.create_subscription(PoseArray, "/bamboo/targets", self.on_targets, qos_targets)
         self.create_subscription(Bool, "/ui/run_enabled", self.on_run_enabled, 10)
-
-        # ✅ Camera subscription FIX:
-        #   - topic: /camera/image   (from bridge)
-        #   - QoS:   qos_profile_sensor_data (best-effort, matches bridge/RViz)
-        self.create_subscription(Image, "/camera/image", self.on_rgb, qos_profile_sensor_data)
-
+        self.create_subscription(Image, "/camera/color/image_raw", self.on_rgb, 10)
         self.create_subscription(Odometry, "/odom", self.on_odom, 10)
 
         # --- Publishers & Services ---
@@ -100,15 +91,14 @@ class AutoTargetScan(Node):
         self.run_enabled = False
 
         # timers
-        self.timeout_timer = None        # Nav2 stall
-        self.scan_timer = None          # periodic scan tick
-        self.scan_start_time: Optional[float] = None
-        self.first_frame_seen = False   # for logging
+        self.timeout_timer = None
+        self.scan_timer = None
 
         # --- Nav2 ---
         self.nav_client = ActionClient(self, NavigateToPose, "navigate_to_pose")
+        self.goal_handle = None  # <— track current goal so we can cancel during SCAN
 
-        self.get_logger().info("🌿 AutoTargetScan (camera-based, faces plant, waits for frames) ready.")
+        self.get_logger().info("🌿 AutoTargetScan (camera-based, faces plant) ready.")
 
     # -------------------------------------------------------------
     # Callbacks
@@ -117,35 +107,23 @@ class AutoTargetScan(Node):
         self.run_enabled = msg.data
         self.get_logger().info(f"/ui/run_enabled = {self.run_enabled}")
         if self.run_enabled and self.targets_raw:
+            # (Re)start from full list any time Start is pressed
             self.remaining_targets = self.targets_raw.copy()
             self._move_to_next_target()
 
     def on_targets(self, msg: PoseArray) -> None:
+        # Always refresh list – bamboo_randomizer may be re-run
         self.targets_raw = [Target(p.position.x, p.position.y, p.position.z) for p in msg.poses]
         self.get_logger().info(f"Received {len(self.targets_raw)} bamboo targets.")
         if self.run_enabled and not self.remaining_targets:
+            # If UI is already in RUNNING state, start immediately
             self.remaining_targets = self.targets_raw.copy()
             self._move_to_next_target()
 
     def on_rgb(self, msg: Image) -> None:
         try:
-            # Log first frame info to confirm camera is alive
-            if not self.first_frame_seen:
-                self.first_frame_seen = True
-                self.get_logger().info(
-                    f"📷 First camera frame: encoding='{msg.encoding}', "
-                    f"{msg.width}x{msg.height}"
-                )
-
-            # Convert to BGR for OpenCV
-            if msg.encoding != "bgr8":
-                cv_img = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
-            else:
-                cv_img = self.bridge.imgmsg_to_cv2(msg, "bgr8")
-
-            self.rgb = cv_img
-        except Exception as e:
-            self.get_logger().error(f"Camera conversion failed: {e}")
+            self.rgb = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+        except Exception:
             self.rgb = None
 
     def on_odom(self, msg: Odometry) -> None:
@@ -155,7 +133,7 @@ class AutoTargetScan(Node):
         )
 
     def on_restart(self, _req: Trigger.Request, _ctx=None) -> Trigger.Response:
-        # Keep self.targets_raw so we can restart on same bamboos
+        # IMPORTANT: keep self.targets_raw so we don't lose bamboo targets
         self.run_enabled = False
         self.state = "IDLE"
         self.current = None
@@ -169,7 +147,14 @@ class AutoTargetScan(Node):
         if self.scan_timer:
             self.scan_timer.cancel()
             self.scan_timer = None
-        self.scan_start_time = None
+
+        # Cancel any active nav goal
+        if self.goal_handle is not None:
+            try:
+                self.goal_handle.cancel_goal_async()
+            except Exception:
+                pass
+            self.goal_handle = None
 
         self.get_logger().info("🔄 Restarted scanner (targets preserved).")
         return Trigger.Response(success=True, message="Restarted.")
@@ -185,6 +170,7 @@ class AutoTargetScan(Node):
             return
 
         rx, ry = self.robot_xy
+        # Pick nearest plant
         next_target = min(self.remaining_targets, key=lambda t: math.hypot(t.x - rx, t.y - ry))
         self.remaining_targets.remove(next_target)
         self.current = next_target
@@ -195,17 +181,18 @@ class AutoTargetScan(Node):
         dist = math.hypot(dx, dy) or 1e-6
         ux, uy = dx / dist, dy / dist
 
-        # Scan point = slightly before plant
+        # Scan point = standoff_m away from plant along robot->plant line
         sx, sy = gx - ux * self.standoff_m, gy - uy * self.standoff_m
         self.scan_point = (sx, sy)
 
         self.get_logger().info(
             f"🎯 New target #{len(self.results)+1}: "
-            f"plant=({gx:.2f}, {gy:.2f}), "
-            f"scan_point=({sx:.2f}, {sy:.2f}), "
-            f"robot=({rx:.2f}, {ry:.2f}), dist={dist:.2f} m."
+            f"plant at map ({gx:.2f}, {gy:.2f}), "
+            f"scan point at ({sx:.2f}, {sy:.2f}), "
+            f"robot at ({rx:.2f}, {ry:.2f}), dist={dist:.2f} m."
         )
 
+        # Go to scan point, facing the plant
         self._send_nav_goal(sx, sy, face_x=gx, face_y=gy)
 
     def _send_nav_goal(self, gx: float, gy: float,
@@ -222,7 +209,7 @@ class AutoTargetScan(Node):
         goal.pose.pose.position.x = gx
         goal.pose.pose.position.y = gy
 
-        # Face the plant with yaw
+        # Yaw so robot faces the plant
         if face_x is not None and face_y is not None:
             yaw = math.atan2(face_y - gy, face_x - gx)
         else:
@@ -246,20 +233,22 @@ class AutoTargetScan(Node):
         send_future = self.nav_client.send_goal_async(goal)
         send_future.add_done_callback(self._on_goal_sent)
 
-        # Nav2 stall timeout
+        # reset / start Nav2 timeout timer
         if self.timeout_timer:
             self.timeout_timer.cancel()
         self.timeout_timer = self.create_timer(12.0, self._check_scan_timeout)
 
     def _on_goal_sent(self, future):
-        goal_handle = future.result()
-        if not goal_handle.accepted:
+        self.goal_handle = future.result()
+        if not self.goal_handle.accepted:
             self.get_logger().warn("❌ Nav2 goal rejected, skipping to next.")
+            self.goal_handle = None
             self._move_to_next_target()
             return
-        goal_handle.get_result_async().add_done_callback(self._on_goal_result)
+        self.goal_handle.get_result_async().add_done_callback(self._on_goal_result)
 
     def _on_goal_result(self, future):
+        """Called when Nav2 reports a goal has finished (success/failure)."""
         if not self.current:
             return
 
@@ -273,18 +262,20 @@ class AutoTargetScan(Node):
         rx, ry = self.robot_xy
         dist = math.hypot(gx - rx, gy - ry)
 
+        # Cancel timeout timer (goal finished)
         if self.timeout_timer:
             self.timeout_timer.cancel()
             self.timeout_timer = None
 
+        # goal finished, clear handle
+        self.goal_handle = None
+
         if status == GoalStatus.STATUS_SUCCEEDED:
             self.get_logger().info(
-                f"✅ Arrived at scan point. robot=({rx:.2f}, {ry:.2f}), "
-                f"plant=({gx:.2f}, {gy:.2f}), dist_to_plant={dist:.2f} m. "
-                f"Starting timed scan."
+                f"✅ Arrived at scan point. Robot=({rx:.2f}, {ry:.2f}), "
+                f"plant=({gx:.2f}, {gy:.2f}), dist_to_plant={dist:.2f} m. Starting timed scan."
             )
-            self.state = "SCAN"
-            self._perform_scan_and_continue()
+            self._enter_scan_mode()
         else:
             self.get_logger().warn(f"Goal ended with status {status}, retrying scan point.")
             if self.scan_point is not None:
@@ -293,23 +284,38 @@ class AutoTargetScan(Node):
             else:
                 self._move_to_next_target()
 
+    def _enter_scan_mode(self):
+        """Switch from LiDAR navigation to camera scan: cancel Nav2 and start timed scan."""
+        if self.goal_handle is not None:
+            try:
+                self.goal_handle.cancel_goal_async()
+            except Exception:
+                pass
+            self.goal_handle = None
+        self.state = "SCAN"
+        self._perform_scan_and_continue()
+
     def _check_scan_timeout(self):
+        """Force a scan if Nav2 stalls near target for too long."""
         if self.state == "MOVE" and self.current:
             gx, gy = self.current.x, self.current.y
             rx, ry = self.robot_xy
             dist = math.hypot(gx - rx, gy - ry)
             if dist <= self.close_distance_m * 1.5:
                 self.get_logger().warn(
-                    f"⏳ Timeout near plant=({gx:.2f}, {gy:.2f}), "
+                    f"⏳ Timeout near plant at ({gx:.2f}, {gy:.2f}), "
                     f"robot=({rx:.2f}, {ry:.2f}), dist={dist:.2f} m — forcing scan."
                 )
-                self.state = "SCAN"
-                self._perform_scan_and_continue()
+                self._enter_scan_mode()
 
     # -------------------------------------------------------------
     # Scanning & UI
     # -------------------------------------------------------------
     def _perform_scan_and_continue(self) -> None:
+        """
+        Start a non-blocking timed scan: wait scan_time_sec seconds while
+        camera frames keep updating, then analyze the latest frame.
+        """
         if not self.current:
             self.get_logger().warn("SCAN requested but no current target.")
             return
@@ -317,8 +323,8 @@ class AutoTargetScan(Node):
         gx, gy = self.current.x, self.current.y
         rx, ry = self.robot_xy
         self.get_logger().info(
-            f"📸 Beginning scan window of {self.scan_time_sec:.1f}s "
-            f"at robot=({rx:.2f}, {ry:.2f}) looking at plant=({gx:.2f}, {gy:.2f})."
+            f"📸 Capturing camera for {self.scan_time_sec:.1f}s at "
+            f"robot=({rx:.2f}, {ry:.2f}) looking at plant=({gx:.2f}, {gy:.2f})."
         )
 
         # cancel any existing scan timer
@@ -326,42 +332,21 @@ class AutoTargetScan(Node):
             self.scan_timer.cancel()
             self.scan_timer = None
 
-        # start periodic scan tick (0.1s) – waits for camera + time window
-        self.scan_start_time = self.get_clock().now().nanoseconds / 1e9
-        self.scan_timer = self.create_timer(0.1, self._scan_tick)
+        # one-shot timer: after scan_time_sec, _finish_scan() will run
+        self.scan_timer = self.create_timer(self.scan_time_sec, self._finish_scan)
 
-    def _scan_tick(self) -> None:
-        """Runs every 0.1s during scan window."""
-        if self.scan_start_time is None:
-            return
-
-        now = self.get_clock().now().nanoseconds / 1e9
-        elapsed = now - self.scan_start_time
-
-        if self.rgb is None:
-            # Only spam once every ~1s
-            if int(elapsed * 10) % 10 == 0:
-                self.get_logger().warn("⏱ Scan window running but no camera frame yet...")
-            return
-
-        if elapsed < self.scan_time_sec:
-            # Still collecting frames
-            return
-
-        # Done: stop timer and finish scan
+    def _finish_scan(self) -> None:
+        """Timer callback: actually analyze most recent camera frame."""
         if self.scan_timer:
             self.scan_timer.cancel()
             self.scan_timer = None
 
-        self._finish_scan()
-
-    def _finish_scan(self) -> None:
         frame = self.rgb.copy() if self.rgb is not None else None
         gx = self.current.x if self.current else 0.0
         gy = self.current.y if self.current else 0.0
 
         self.get_logger().info(
-            f"🔍 Finishing scan for plant=({gx:.2f}, {gy:.2f}). "
+            f"🔍 Finishing scan for plant at ({gx:.2f}, {gy:.2f}). "
             f"Frame {'OK' if frame is not None else 'MISSING'}."
         )
 
@@ -370,10 +355,10 @@ class AutoTargetScan(Node):
         self.state = "MOVE"
         self.current = None
         self.scan_point = None
-        self.scan_start_time = None
         self._move_to_next_target()
 
     def analyze_scene_and_save(self, frame: Optional[np.ndarray], gx: float, gy: float) -> None:
+        """Analyze camera frame to decide red vs green and record coordinates."""
         if frame is None:
             label, conf, path = "green", 0.0, ""
         else:
@@ -388,7 +373,7 @@ class AutoTargetScan(Node):
             idx = len(self.results) + 1
             path = os.path.join(self.scans_dir, f"{idx:02d}_{label}.png")
             cv2.imwrite(path, frame)
-            self.rgb = frame
+            self.rgb = frame  # thumbnail for UI
 
         entry = {
             "id": len(self.results) + 1,
