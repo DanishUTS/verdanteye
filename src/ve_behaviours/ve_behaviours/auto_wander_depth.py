@@ -2,7 +2,8 @@
 # ===============================================================
 # VerdantEye: AutoTargetScan (Nav2 version)
 # - Uses Nav2 /navigate_to_pose for movement (not /cmd_vel)
-# - Automatically visits bamboo targets from randomizer
+# - One-shot target fetching: fetch PoseArray once, visit, re-fetch once, repeat
+# - Remembers visited targets and skips near-duplicates
 # - Scans & classifies at each location
 # ===============================================================
 from __future__ import annotations
@@ -49,11 +50,7 @@ class AutoTargetScan(Node):
         os.makedirs(self.scans_dir, exist_ok=True)
 
         # --- ROS interfaces ---
-        qos_targets = QoSProfile(depth=1)
-        qos_targets.durability = DurabilityPolicy.TRANSIENT_LOCAL
-        qos_targets.reliability = ReliabilityPolicy.RELIABLE
-
-        self.create_subscription(PoseArray, "/bamboo/targets", self.on_targets, qos_targets)
+        # NOTE: We subscribe to /bamboo/targets on-demand (one-shot) — not here.
         self.create_subscription(Bool, "/ui/run_enabled", self.on_run_enabled, 10)
         self.create_subscription(Image, "/camera/color/image_raw", self.on_rgb, 10)
 
@@ -72,6 +69,11 @@ class AutoTargetScan(Node):
         self.state = "IDLE"
         self.run_enabled = False
 
+        # One-shot target subscription handle + visited memory
+        self.target_sub = None              # temporary subscriber to /bamboo/targets
+        self.visited = set()                # {(x_rounded, y_rounded)}
+        self.reach_radius = 0.6             # meters; tolerance for "already visited"
+
         # --- Nav2 Action Client ---
         self.nav_client = ActionClient(self, NavigateToPose, "navigate_to_pose")
 
@@ -79,20 +81,49 @@ class AutoTargetScan(Node):
         self.get_logger().info("🌿 AutoTargetScan (Nav2 version) ready.")
 
     # -------------------------------------------------------------
+    # One-shot subscription helper
+    # -------------------------------------------------------------
+    def subscribe_targets_once(self):
+        """Subscribe to /bamboo/targets once (TRANSIENT_LOCAL). Destroy after first message."""
+        if self.target_sub is not None:
+            return  # already waiting for a PoseArray
+
+        qos = QoSProfile(depth=1)
+        qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        qos.reliability = ReliabilityPolicy.RELIABLE
+
+        self.get_logger().info("Subscribing (one-shot) for /bamboo/targets...")
+        self.target_sub = self.create_subscription(
+            PoseArray, "/bamboo/targets", self.on_targets, qos
+        )
+
+    # -------------------------------------------------------------
     # Callbacks
     # -------------------------------------------------------------
     def on_run_enabled(self, msg: Bool) -> None:
         self.run_enabled = msg.data
         self.get_logger().info(f"/ui/run_enabled = {self.run_enabled}")
-        if self.run_enabled and self.targets_raw:
-            self.plan_from_current_pose()
+        if self.run_enabled:
+            # fetch the latest targets exactly once; on_targets will build a plan
+            self.subscribe_targets_once()
             self.state = "MOVE"
         else:
             self.state = "IDLE"
 
     def on_targets(self, msg: PoseArray) -> None:
+        # Save list and immediately stop listening (one-shot)
         self.targets_raw = [Target(p.position.x, p.position.y, p.position.z) for p in msg.poses]
-        self.get_logger().info(f"Received {len(self.targets_raw)} targets from randomizer.")
+        self.get_logger().info(f"Received {len(self.targets_raw)} targets (one-shot).")
+
+        if self.target_sub is not None:
+            try:
+                self.destroy_subscription(self.target_sub)
+            except Exception:
+                pass
+            self.target_sub = None
+
+        # Build a new plan excluding already-visited
+        self.plan_from_current_pose()
 
     def on_rgb(self, msg: Image) -> None:
         try:
@@ -106,21 +137,36 @@ class AutoTargetScan(Node):
         self.plan.clear()
         self.current = None
         self.results.clear()
+        self.targets_raw.clear()
+        self.visited.clear()
         self.get_logger().info("Scanner reset.")
         return Trigger.Response(success=True, message="Restarted.")
 
     # -------------------------------------------------------------
     # Planning
     # -------------------------------------------------------------
+    def _is_visited(self, t: Target) -> bool:
+        rx, ry = round(t.x, 3), round(t.y, 3)
+        for vx, vy in self.visited:
+            dx, dy = rx - vx, ry - vy
+            if (dx * dx + dy * dy) <= (self.reach_radius * self.reach_radius):
+                return True
+        return False
+
     def plan_from_current_pose(self) -> None:
         if not self.targets_raw:
             self.plan = []
             self.state = "WAITING_FOR_TARGETS"
             return
 
-        ordered = self.targets_raw.copy()
+        ordered = [t for t in self.targets_raw if not self._is_visited(t)]
+        # import random; random.shuffle(ordered)  # optional randomness
         self.plan = ordered
         self.current = None
+
+        self.get_logger().info(f"Planning: {len(self.plan)} unvisited targets queued.")
+        if not self.plan and self.run_enabled:
+            self.state = "DONE"
 
     # -------------------------------------------------------------
     # Main loop
@@ -129,19 +175,30 @@ class AutoTargetScan(Node):
         self.render_ui()
         if not self.run_enabled:
             return
+
         if self.state == "MOVE":
             if self.current is None and self.plan:
                 self.current = self.plan.pop(0)
                 self.send_nav_goal(self.current.x, self.current.y)
             elif self.current is None and not self.plan:
-                self.state = "DONE"
+                # No queued plan -> fetch once and wait
+                if self.target_sub is None:
+                    self.subscribe_targets_once()
+                self.state = "WAITING_FOR_TARGETS"
+
         elif self.state == "SCAN":
-            # Wait few seconds to simulate scanning
+            # Do the scan/classification, then re-check targets exactly once
             self.analyze_scene_and_save()
             self.current = None
-            self.state = "MOVE" if self.plan else "DONE"
+            self.subscribe_targets_once()  # re-fetch after reaching a target
+            self.state = "MOVE"
+
         elif self.state == "DONE":
             self.publish_checklist()
+
+        elif self.state == "WAITING_FOR_TARGETS":
+            # Idle; on_targets will rebuild the plan and push us back to MOVE
+            pass
 
     # -------------------------------------------------------------
     # Nav2 control
@@ -168,13 +225,16 @@ class AutoTargetScan(Node):
         goal_handle = future.result()
         if not goal_handle.accepted:
             self.get_logger().warn("Nav2 goal rejected.")
+            # Skip this target and continue
+            self.current = None
+            self.state = "MOVE" if self.plan else "DONE"
             return
         self.get_logger().info("Nav2 goal accepted.")
         result_future = goal_handle.get_result_async()
         result_future.add_done_callback(self._on_goal_result)
 
     def _on_goal_result(self, future):
-        result = future.result().result
+        _ = future.result().result
         self.get_logger().info("✅ Nav2 reached goal, starting scan...")
         self.state = "SCAN"
 
@@ -206,6 +266,11 @@ class AutoTargetScan(Node):
             "notes": f"{label} dominance {round(conf*100)}%"
         }
         self.results.append(entry)
+
+        # Remember this just-visited target
+        if self.current is not None:
+            self.visited.add((round(self.current.x, 3), round(self.current.y, 3)))
+
         self.publish_checklist()
 
     def publish_checklist(self) -> None:
