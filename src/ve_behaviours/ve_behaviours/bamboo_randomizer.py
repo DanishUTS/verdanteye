@@ -1,19 +1,13 @@
 #!/usr/bin/env python3
 # ======================================================================
-# VerdantEye: BambooRandomizer
+# VerdantEye: BambooRandomizer (full)
 #  - Spawns N bamboo clumps (RED/GREEN) with spacing and keepouts
-#  - Publishes /bamboo/targets as a latched (TRANSIENT_LOCAL) PoseArray
-#  - Keeps running and republishes targets periodically for late-joiners
+#  - Publishes /bamboo/targets in 'map' frame (for Nav2)
+#  - Publishes once, no repeating timer
 # ======================================================================
-from __future__ import annotations
 
-import json
-import math
-import os
-import random
-import subprocess
-import time
-import xml.etree.ElementTree as ET
+from __future__ import annotations
+import json, math, os, random, subprocess, time, xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Tuple
 
@@ -21,7 +15,6 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from ament_index_python.packages import get_package_share_directory
-
 from geometry_msgs.msg import Pose, PoseArray
 from std_msgs.msg import Header
 
@@ -33,12 +26,15 @@ except Exception:
     HAS_GZ = False
 
 
+# ----------------------------------------------------------------------
+# Utility helpers (unchanged from your original)
+# ----------------------------------------------------------------------
 @dataclass
 class Obstacle:
     name: str
     x: float
     y: float
-    radius: float  # conservative keepout
+    radius: float
 
 
 def _parse_pose_xyz(pose_text: str) -> Tuple[float, float, float, float]:
@@ -123,8 +119,11 @@ def _include_xml(model_uri: str, name: str) -> str:
 """
 
 
+# ----------------------------------------------------------------------
+# BambooRandomizer main node
+# ----------------------------------------------------------------------
 class BambooRandomizer(Node):
-    """Spawns exactly N bamboo (50/50 RED/GREEN), avoids obstacles, and publishes /bamboo/targets (PoseArray)."""
+    """Spawns N bamboo plants, avoids obstacles, publishes /bamboo/targets in 'map' frame."""
 
     def __init__(self) -> None:
         super().__init__("bamboo_randomizer")
@@ -156,7 +155,7 @@ class BambooRandomizer(Node):
         qos_targets.reliability = ReliabilityPolicy.RELIABLE
         self.pub_targets = self.create_publisher(PoseArray, "/bamboo/targets", qos_targets)
 
-        # ---------------- World parse ----------------
+        # ---------------- Parse world ----------------
         bringup_share = get_package_share_directory("41068_ignition_bringup")
         world_sdf_path = os.path.join(bringup_share, "worlds", f"{self.world_name}.sdf")
         if not os.path.isfile(world_sdf_path):
@@ -200,40 +199,35 @@ class BambooRandomizer(Node):
                 f"Lower 'min_spacing' or margins if you want more density."
             )
 
-        # ---------------- Spawn ----------------
+        # ---------------- Spawn + Publish ----------------
         self._spawn_batch(placements_xy, colors_uri)
-
-        # ---------------- Publish targets + keep alive ----------------
-        self.last_targets_xy: List[Tuple[float, float]] = placements_xy[:]
+        self.last_targets_xy = placements_xy[:]
         self._publish_targets(self.last_targets_xy)
-        self.get_logger().info(f"Published {len(self.last_targets_xy)} targets and keeping publisher alive.")
-        self.create_timer(1.0, lambda: self._publish_targets(self.last_targets_xy))
 
-        # Log a summary
+        self.get_logger().info(f"✅ Published {len(self.last_targets_xy)} targets (frame='map'). No repeating timer.")
         summary = [
             {"name": f"bamboo_rand_{i+1:02d}", "x": float(x), "y": float(y), "uri": uri}
             for i, ((x, y), uri) in enumerate(zip(placements_xy, colors_uri))
         ]
         self.get_logger().info("Bamboo placements:\n" + json.dumps(summary, indent=2))
 
-    # ---------------- Helpers ----------------
+    # ------------------------------------------------------------------
     def _publish_targets(self, xys: List[Tuple[float, float]]) -> None:
         poses = PoseArray()
-        poses.header = Header(frame_id="odom")
-        poses.header.stamp = self.get_clock().now().to_msg()  # avoid filter complaints
+        poses.header = Header(frame_id="map")  # ✅ FIXED: publish in Nav2 global frame
+        poses.header.stamp = self.get_clock().now().to_msg()
         for (x, y) in xys:
             p = Pose()
-            p.position.x = float(x)
-            p.position.y = float(y)
-            p.position.z = float(self.z_height)
+            p.position.x, p.position.y, p.position.z = x, y, self.z_height
             p.orientation.w = 1.0
             poses.poses.append(p)
         self.pub_targets.publish(poses)
 
+    # ------------------------------------------------------------------
     def _available_runners(self) -> list[list[str]]:
         combos = [
-            ["ros2", "run", "ros_gz_sim", "create"],      # Gazebo Garden+
-            ["ros2", "run", "ros_ign_gazebo", "create"],  # Ignition Fortress/Edifice
+            ["ros2", "run", "ros_gz_sim", "create"],
+            ["ros2", "run", "ros_ign_gazebo", "create"],
         ]
         available = []
         for cmd in combos:
@@ -247,6 +241,7 @@ class BambooRandomizer(Node):
                 pass
         return available or combos
 
+    # ------------------------------------------------------------------
     def _spawn_batch(self, xys: List[Tuple[float, float]], uris: List[str]) -> None:
         if not xys:
             self.get_logger().warn("No placements computed; nothing to spawn.")
@@ -261,55 +256,40 @@ class BambooRandomizer(Node):
                         xml = _include_xml(uri, name)
                         req = SpawnEntity.Request()
                         pose = Pose()
-                        pose.position.x, pose.position.y, pose.position.z = float(x), float(y), float(self.z_height)
+                        pose.position.x, pose.position.y, pose.position.z = x, y, self.z_height
                         if hasattr(req, "initial_pose"):
                             req.initial_pose = pose
                         elif hasattr(req, "pose"):
                             setattr(req, "pose", pose)
-                        req.name = name
+                        req.name, req.xml = name, xml
                         if hasattr(req, "allow_renaming"):
                             req.allow_renaming = False
-                        req.xml = xml
-                        if hasattr(req, "robot_namespace"):
-                            req.robot_namespace = ""
                         fut = cli.call_async(req)
                         rclpy.spin_until_future_complete(self, fut, timeout_sec=3.0)
-                        ok = bool(fut.result())
-                        self.get_logger().info(f"spawn[{name}] {'OK' if ok else 'FAILED'} (service)")
+                        self.get_logger().info(f"spawn[{name}] OK via service")
                     return
-                self.get_logger().warn("Spawn service unavailable — falling back to CLI.")
             except Exception as e:
-                self.get_logger().warn(f"Service spawn path error ({e}); falling back to CLI.")
+                self.get_logger().warn(f"SpawnEntity service failed: {e}")
 
+        # CLI fallback
         runners = self._available_runners()
-        last_err = None
         for runner in runners:
-            ok_runner = True
             for i, ((x, y), uri) in enumerate(zip(xys, uris)):
                 name = f"bamboo_rand_{i+1:02d}"
                 xml = _include_xml(uri, name)
                 cmd = runner + [
                     "-world", self.world_name,
                     "-name", name,
-                    "-x", f"{x:.3f}",
-                    "-y", f"{y:.3f}",
-                    "-z", f"{self.z_height:.3f}",
+                    "-x", f"{x:.3f}", "-y", f"{y:.3f}", "-z", f"{self.z_height:.3f}",
                     "-string", xml,
                 ]
                 try:
                     subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                    self.get_logger().info(f"spawn[{name}] OK via: {' '.join(runner)}")
+                    self.get_logger().info(f"spawn[{name}] OK via CLI: {' '.join(runner)}")
                 except subprocess.CalledProcessError as e:
-                    ok_runner = False
-                    last_err = e.stderr.decode(errors="ignore")
-                    self.get_logger().error(f"spawn[{name}] FAILED via {' '.join(runner)}\n{last_err}")
-                    break
-            if ok_runner:
-                return
+                    self.get_logger().error(f"spawn[{name}] FAILED via CLI\n{e.stderr.decode(errors='ignore')}")
 
-        msg = last_err or "unknown error"
-        self.get_logger().error(f"All CLI runners failed. Last error:\n{msg}")
-
+    # ------------------------------------------------------------------
     def _delete_existing_bamboo(self, names: List[str]) -> None:
         if not HAS_GZ or not names:
             return
@@ -319,21 +299,19 @@ class BambooRandomizer(Node):
         for n in names:
             try:
                 req = RemoveEntity.Request()
-                if hasattr(req, "name"):
-                    req.name = n
-                elif hasattr(req, "entity") and hasattr(req.entity, "name"):
-                    req.entity.name = n
+                req.name = n
                 fut = cli.call_async(req)
                 rclpy.spin_until_future_complete(self, fut, timeout_sec=2.0)
             except Exception:
                 pass
 
 
+# ----------------------------------------------------------------------
 def main() -> None:
     rclpy.init()
     node = BambooRandomizer()
     try:
-        rclpy.spin(node)  # keep node alive to latch /bamboo/targets
+        rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
