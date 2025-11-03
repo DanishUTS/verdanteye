@@ -64,7 +64,7 @@ def _radius_for(name: str, uri: str) -> float:
     if name.startswith("platypus"):
         return 0.6
     if name.startswith("bamboo_thicket"):
-        return 0.9
+        return 0.6
     if name.startswith("forest_wall"):
         return 0.9
     return 0.8
