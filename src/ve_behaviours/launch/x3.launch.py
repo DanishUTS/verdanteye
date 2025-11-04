@@ -64,7 +64,7 @@ def generate_launch_description():
         executable='ekf_node',
         name='robot_localization',
         output='screen',
-        parameters=[PathJoinSubstitution([config_ignition,
+        parameters=[PathJoinSubstitution([config_x3,
                                           'robot_localization.yaml']),
                     {'use_sim_time': use_sim_time}]
     )
@@ -95,7 +95,7 @@ def generate_launch_description():
         executable='create',
         output='screen',
         parameters=[{'use_sim_time': use_sim_time}],
-        arguments=['-topic', '/robot_description', '-z', '2.0'] # z is height above ground
+        arguments=['-topic', '/robot_description', '-x', '-11.0', '-y', '11.0', '-z', '2.0'] # z is height above ground
     )
     ld.add_action(robot_spawner)
 

@@ -1,0 +1,17 @@
+digraph G {
+"map" -> "odom"[label=" Broadcaster: default_authority\nAverage rate: 62.667\nBuffer length: 1.5\nMost recent transform: 178.8\nOldest transform: 177.3\n"];
+"base_link" -> "rotor_0"[label=" Broadcaster: default_authority\nAverage rate: 20.667\nBuffer length: 1.5\nMost recent transform: 178.7\nOldest transform: 177.2\n"];
+"odom" -> "base_link"[label=" Broadcaster: default_authority\nAverage rate: 31.2\nBuffer length: 1.25\nMost recent transform: 178.68\nOldest transform: 177.43\n"];
+"base_link" -> "rotor_1"[label=" Broadcaster: default_authority\nAverage rate: 20.667\nBuffer length: 1.5\nMost recent transform: 178.7\nOldest transform: 177.2\n"];
+"base_link" -> "rotor_2"[label=" Broadcaster: default_authority\nAverage rate: 20.667\nBuffer length: 1.5\nMost recent transform: 178.7\nOldest transform: 177.2\n"];
+"base_link" -> "rotor_3"[label=" Broadcaster: default_authority\nAverage rate: 20.667\nBuffer length: 1.5\nMost recent transform: 178.7\nOldest transform: 177.2\n"];
+"base_link" -> "imu_link"[label=" Broadcaster: default_authority\nAverage rate: 10000.0\nBuffer length: 0.0\nMost recent transform: 0.0\nOldest transform: 0.0\n"];
+"rgbd_camera_link" -> "rgbd_camera_frame"[label=" Broadcaster: default_authority\nAverage rate: 10000.0\nBuffer length: 0.0\nMost recent transform: 0.0\nOldest transform: 0.0\n"];
+"base_link" -> "rgbd_camera_link"[label=" Broadcaster: default_authority\nAverage rate: 10000.0\nBuffer length: 0.0\nMost recent transform: 0.0\nOldest transform: 0.0\n"];
+"rgbd_camera_frame" -> "rgbd_camera_optical_frame"[label=" Broadcaster: default_authority\nAverage rate: 10000.0\nBuffer length: 0.0\nMost recent transform: 0.0\nOldest transform: 0.0\n"];
+"base_link" -> "base_scan"[label=" Broadcaster: default_authority\nAverage rate: 10000.0\nBuffer length: 0.0\nMost recent transform: 0.0\nOldest transform: 0.0\n"];
+edge [style=invis];
+ subgraph cluster_legend { style=bold; color=black; label ="view_frames Result";
+"Recorded at time: 1762228956.7685688"[ shape=plaintext ] ;
+}->"map";
+}
