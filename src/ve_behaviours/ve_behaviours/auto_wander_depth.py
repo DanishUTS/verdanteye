@@ -4,8 +4,9 @@
 # - Drives to a standoff point facing the plant
 # - LiDAR watchdog prevents bumper-kisses, creep-in if short
 # - Only scans when yaw aligned + plant is in LiDAR window
-# - Post-scan ESCAPE: back up + pivot toward clearer side (NEW)
+# - Post-scan ESCAPE: back up + pivot toward clearer side
 # - UI image + JSON checklist
+# - UPDATED: classify & save only central crop (target region)
 # ===============================================================
 
 from __future__ import annotations
@@ -45,14 +46,16 @@ def yaw_to_quat(yaw: float) -> Tuple[float, float, float, float]:
 
 def quat_to_yaw(x: float, y: float, z: float, w: float) -> float:
     # yaw from quaternion (Z axis)
-    siny_cosp = 2.0 * (w*z + x*y)
-    cosy_cosp = 1.0 - 2.0 * (y*y + z*z)
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
     return math.atan2(siny_cosp, cosy_cosp)
 
 
 def angle_wrap(a: float) -> float:
-    while a > math.pi: a -= 2.0*math.pi
-    while a < -math.pi: a += 2.0*math.pi
+    while a > math.pi:
+        a -= 2.0 * math.pi
+    while a < -math.pi:
+        a += 2.0 * math.pi
     return a
 
 
@@ -82,8 +85,8 @@ class AutoWanderDepth(Node):
         self.declare_parameter("scan_min_m", 0.50)           # min scan distance
         self.declare_parameter("scan_max_m", 1.30)           # wider window (was 0.90)
         self.declare_parameter("align_kp", 1.6)
-        self.declare_parameter("max_ang_vel", 1.7)
-        self.declare_parameter("creep_lin_vel", 0.06)        # slower creep (was 0.09)
+        self.declare_parameter("max_ang_vel", 2.1)
+        self.declare_parameter("creep_lin_vel", 0.04)        # slower creep (was 0.09)
         self.declare_parameter("creep_allow", True)
         self.declare_parameter("yaw_ok_deg", 3.0)            # tighter yaw (was 7.0)
 
@@ -99,6 +102,10 @@ class AutoWanderDepth(Node):
         self.declare_parameter("escape_turn_time", 2.0)      # seconds pivot
         self.declare_parameter("escape_turn_speed", 2.0)     # rad/s
         self.declare_parameter("escape_min_clear_m", 1.20)   # smaller clearance ok (was 1.40)
+        
+        # Image cropping fraction (controls how much of the frame is kept)
+        self.declare_parameter("crop_center_fraction", 0.6)
+
 
         # ---------- Read params ----------
         self.cmd_vel_topic: str = self.get_parameter("cmd_vel_topic").value
@@ -131,6 +138,8 @@ class AutoWanderDepth(Node):
         self.escape_turn_time: float = float(self.get_parameter("escape_turn_time").value)
         self.escape_turn_speed: float = float(self.get_parameter("escape_turn_speed").value)
         self.escape_min_clear_m: float = float(self.get_parameter("escape_min_clear_m").value)
+
+        self.crop_center_fraction: float = float(self.get_parameter("crop_center_fraction").value)
 
         os.makedirs(os.path.expanduser("~/.ros/plant_scans"), exist_ok=True)
         self.scans_dir = os.path.expanduser("~/.ros/plant_scans")
@@ -189,7 +198,7 @@ class AutoWanderDepth(Node):
         # LiDAR watchdog @ 10 Hz
         self.watchdog_timer = self.create_timer(0.1, self._lidar_watchdog)
 
-        self.get_logger().info("auto_wander_depth ready: RGB+LiDAR, Nav2-integrated (safe-creep + centered alignment).")
+        self.get_logger().info("auto_wander_depth ready: RGB+LiDAR, Nav2-integrated (target-crop mode).")
 
     # ---------------- Utilities ----------------
     def throttle(self, key: str, sec: float) -> bool:
@@ -211,11 +220,13 @@ class AutoWanderDepth(Node):
 
     def _range_min_in(self, start_deg: float, end_deg: float) -> Optional[float]:
         scan = self.scan_msg
-        if not scan: return None
+        if not scan:
+            return None
         idx = self._scan_window_indices(math.radians(start_deg), math.radians(end_deg))
-        if not idx: return None
+        if not idx:
+            return None
         s, e = idx
-        vals = [r for r in scan.ranges[s:e+1] if np.isfinite(r) and r > 0.0]
+        vals = [r for r in scan.ranges[s:e + 1] if np.isfinite(r) and r > 0.0]
         return min(vals) if vals else None
 
     def front_min_range(self) -> Optional[float]:
@@ -224,7 +235,7 @@ class AutoWanderDepth(Node):
         return self._range_min_in(-half, +half)
 
     def side_clearance(self) -> Tuple[Optional[float], Optional[float]]:
-        # look at left/right wedges to decide turn direction for escape
+        # Look at left/right wedges to decide turn direction for escape
         # Right: [-100, -40], Left: [40, 100] degrees
         rmin = self._range_min_in(-100.0, -40.0)
         lmin = self._range_min_in(+40.0, +100.0)
@@ -248,11 +259,15 @@ class AutoWanderDepth(Node):
 
     def on_rgb(self, msg: Image) -> None:
         try:
-            self.rgb = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+            frame = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+            # --- NEW: crop to central 60 % of the frame ---
+            frame = self._crop_central_roi(frame)
+            self.rgb = frame
         except Exception as e:
             if self.throttle("rgb_fail", 2.0):
                 self.get_logger().warn(f"RGB conversion failed: {e}")
             self.rgb = None
+
 
     def on_odom(self, msg: Odometry) -> None:
         self.robot_xy = (float(msg.pose.pose.position.x), float(msg.pose.pose.position.y))
@@ -272,7 +287,8 @@ class AutoWanderDepth(Node):
         self.remaining_targets.clear()
 
         for t in (self.timeout_timer, self.scan_timer, self.align_timer, self.scan_gate_timer, self.escape_timer):
-            if t: t.cancel()
+            if t:
+                t.cancel()
         self.timeout_timer = self.scan_timer = self.align_timer = self.scan_gate_timer = self.escape_timer = None
         self._escape_phase = ""
         self._pending_after_escape = None
@@ -357,14 +373,15 @@ class AutoWanderDepth(Node):
             return
         result = future.result()
         if self.timeout_timer:
-            self.timeout_timer.cancel(); self.timeout_timer = None
+            self.timeout_timer.cancel()
+            self.timeout_timer = None
         self.goal_handle = None
 
         if result and result.status == GoalStatus.STATUS_SUCCEEDED:
             self._enter_scan_mode()
         else:
             if self.throttle("goal_fail", 1.0):
-                self.get_logger().warn(f"Goal failed (status={getattr(result,'status','?')}); retrying scan point.")
+                self.get_logger().warn(f"Goal failed (status={getattr(result, 'status', '?')}); retrying scan point.")
             if self.scan_point is not None:
                 sx, sy = self.scan_point
                 self._send_nav_goal(sx, sy, face_x=self.current.x, face_y=self.current.y)
@@ -408,15 +425,13 @@ class AutoWanderDepth(Node):
         self._align_start_time = time.time()
         self.align_timer = self.create_timer(0.05, self._align_step)
 
-    # ---------- ALIGNMENT FIX (tighter + steady hold + damping) ----------
     def _align_step(self):
         if not self.current:
             return
         # desired yaw toward plant
         des = math.atan2(self.current.y - self.robot_xy[1], self.current.x - self.robot_xy[0])
         err = angle_wrap(des - self.robot_yaw)
-        deg_err = abs(math.degrees(err))
-        yaw_ok = deg_err <= self.yaw_ok_deg  # uses param (default 3 deg)
+        yaw_ok = abs(math.degrees(err)) <= self.yaw_ok_deg
 
         # stop if timeout
         if time.time() - getattr(self, "_align_start_time", 0.0) > self.align_timeout_sec:
@@ -425,28 +440,20 @@ class AutoWanderDepth(Node):
             self._open_scan_gate()
             return
 
-        # simple P controller on yaw with damping, no linear motion while aligning
+        # simple P controller on yaw, no linear motion while aligning
         cmd = Twist()
-        cmd.angular.z = clamp(self.align_kp * err, -self.max_ang_vel, self.max_ang_vel) * 0.8  # damping
+        cmd.angular.z = clamp(self.align_kp * err, -self.max_ang_vel, self.max_ang_vel)
         self.pub_cmd.publish(cmd)
 
-        # must hold alignment steadily for 0.3s
-        now = time.time()
         if yaw_ok:
-            if not hasattr(self, "_yaw_hold_start"):
-                self._yaw_hold_start = now
-            elif now - self._yaw_hold_start > 0.3:
-                self._open_scan_gate()
-                del self._yaw_hold_start
-        else:
-            if hasattr(self, "_yaw_hold_start"):
-                del self._yaw_hold_start
+            self._open_scan_gate()
 
     def _open_scan_gate(self):
         # stop turning and decide whether to creep
         self._publish_stop()
         if self.align_timer:
-            self.align_timer.cancel(); self.align_timer = None
+            self.align_timer.cancel()
+            self.align_timer = None
 
         self.state = "SCAN"
         r = self.front_min_range()
@@ -476,27 +483,21 @@ class AutoWanderDepth(Node):
 
         # capture if both ready OR timeout fallthrough
         timed_out = (time.time() - getattr(self, "_scan_start_time", 0.0)) > self.scan_time_sec
-
-        # NEW: early safety check before watchdog — prevents nose-in bump
-        if r is not None and r < self.safety_stop_m * 1.2:
-            self._publish_stop()
-            if self.throttle("pre_escape", 2.0):
-                self.get_logger().warn(f"⚠️ Too close ({r:.2f} m) — triggering ESCAPE early.")
-            self._start_escape(pending_next="MOVE")
-            return
-
         if (yaw_ok and in_window) or timed_out:
             self._publish_stop()
             if self.scan_timer:
-                self.scan_timer.cancel(); self.scan_timer = None
+                self.scan_timer.cancel()
+                self.scan_timer = None
             if self.scan_gate_timer:
-                self.scan_gate_timer.cancel(); self.scan_gate_timer = None
+                self.scan_gate_timer.cancel()
+                self.scan_gate_timer = None
             # actually capture
             self._finish_scan()
         else:
             # keep creeping if too far
             if self.creep_allow and r is not None and r > self.scan_max_m and self.state == "SCAN":
-                cmd = Twist(); cmd.linear.x = self.creep_lin_vel
+                cmd = Twist()
+                cmd.linear.x = self.creep_lin_vel
                 self.pub_cmd.publish(cmd)
             else:
                 # otherwise hold
@@ -508,7 +509,8 @@ class AutoWanderDepth(Node):
             if self.throttle("force_scan", 1.0):
                 self.get_logger().warn("Scan gate timeout – capturing anyway.")
             if self.scan_timer:
-                self.scan_timer.cancel(); self.scan_timer = None
+                self.scan_timer.cancel()
+                self.scan_timer = None
             self._publish_stop()
             self._finish_scan()
 
@@ -522,12 +524,13 @@ class AutoWanderDepth(Node):
         self.state = "ESCAPE"
         self._start_escape(pending_next="MOVE")  # after escape, resume MOVE/next target
 
-    # ---------------- ESCAPE (NEW) ----------------
+    # ---------------- ESCAPE ----------------
     def _start_escape(self, pending_next: Optional[str] = None):
         """Back up a bit, then pivot toward the side with more clearance."""
         # Cancel align/scan timers if any remain
         for t in (self.align_timer, self.scan_timer, self.scan_gate_timer):
-            if t: t.cancel()
+            if t:
+                t.cancel()
         self.align_timer = self.scan_timer = self.scan_gate_timer = None
 
         self._pending_after_escape = pending_next
@@ -581,7 +584,8 @@ class AutoWanderDepth(Node):
                 self._publish_stop()
                 self._escape_phase = ""
                 if self.escape_timer:
-                    self.escape_timer.cancel(); self.escape_timer = None
+                    self.escape_timer.cancel()
+                    self.escape_timer = None
                 # Resume workflow
                 next_state = self._pending_after_escape or "MOVE"
                 if next_state == "MOVE":
@@ -615,22 +619,50 @@ class AutoWanderDepth(Node):
                 self._start_escape(pending_next=resume)
 
     # ---------------- Perception + UI ----------------
+    def _crop_central_roi(self, frame: np.ndarray) -> np.ndarray:
+        """
+        Return a central crop of the image based on crop_center_fraction.
+
+        If crop_center_fraction = 0.6, we keep the central 60% of width & height.
+        """
+        frac = clamp(self.crop_center_fraction, 0.1, 1.0)  # safety clamp
+        h, w = frame.shape[:2]
+        cw, ch = int(w * frac), int(h * frac)
+
+        # centre the crop
+        x0 = max(0, (w - cw) // 2)
+        y0 = max(0, (h - ch) // 2)
+        x1 = min(w, x0 + cw)
+        y1 = min(h, y0 + ch)
+
+        return frame[y0:y1, x0:x1]
+
     def _analyze_and_record(self, frame: Optional[np.ndarray], gx: float, gy: float) -> None:
         if frame is None:
             label, conf, path = "green", 0.0, ""
         else:
-            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            # Crop to central region so we mostly see the target plant
+            frame_cropped = self._crop_central_roi(frame)
+
+            # Colour analysis on the cropped region only
+            hsv = cv2.cvtColor(frame_cropped, cv2.COLOR_BGR2HSV)
             green = cv2.inRange(hsv, np.array([35, 60, 60]), np.array([85, 255, 255]))
             red = cv2.inRange(hsv, np.array([0, 90, 60]), np.array([10, 255, 255])) | \
                   cv2.inRange(hsv, np.array([170, 90, 60]), np.array([180, 255, 255]))
+
             g_area, r_area = int(np.count_nonzero(green)), int(np.count_nonzero(red))
             total = g_area + r_area or 1
+
             label = "red" if r_area > g_area else "green"
             conf = max(r_area, g_area) / float(total)
+
             idx = len(self.results) + 1
             path = os.path.join(self.scans_dir, f"{idx:02d}_{label}.png")
-            try: cv2.imwrite(path, frame)
-            except Exception: path = ""
+            try:
+                # Save the cropped image, not the full scene
+                cv2.imwrite(path, frame_cropped)
+            except Exception:
+                path = ""
 
         entry = {
             "id": len(self.results) + 1,
@@ -651,10 +683,12 @@ class AutoWanderDepth(Node):
 
     def _render_ui(self) -> None:
         canvas = np.full((360, 480, 3), 25, np.uint8)
-        cv2.putText(canvas, f"STATE: {self.state}", (16, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
-        cv2.putText(canvas, f"Visited: {len(self.results)}", (16, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200,200,200), 1)
+        cv2.putText(canvas, f"STATE: {self.state}", (16, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        cv2.putText(canvas, f"Visited: {len(self.results)}", (16, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 1)
         if self.rgb is not None:
-            thumb = cv2.resize(self.rgb, (160, 120))
+            # Show cropped view in the UI thumbnail as well
+            roi = self._crop_central_roi(self.rgb)
+            thumb = cv2.resize(roi, (160, 120))
             canvas[200:320, 300:460] = thumb
         try:
             self.pub_ui.publish(self.bridge.cv2_to_imgmsg(canvas, "bgr8"))
