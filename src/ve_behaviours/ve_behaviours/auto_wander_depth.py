@@ -74,7 +74,7 @@ class AutoWanderDepth(Node):
         self.declare_parameter("restart_srv", "/ui/restart")
         self.declare_parameter("nav_goal_action", "navigate_to_pose")
         self.declare_parameter("goal_frame", "map")  # set to 'odom' if no localization
-        self.declare_parameter("standoff_m", 0.55)
+        self.declare_parameter("standoff_m", 0.5)
 
         # LiDAR/safety & alignment (SAFER DEFAULTS)
         self.declare_parameter("safety_stop_m", 0.55)        # safer (was 0.45)
