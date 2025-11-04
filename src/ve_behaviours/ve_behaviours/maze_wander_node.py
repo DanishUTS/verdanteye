@@ -65,23 +65,23 @@ class MazeWanderNode(Node):
         self.declare_parameter("pose_topic", "/X3/pose")  # NEW
 
         # --- Altitude control params ---
-        self.declare_parameter("target_altitude", 1.5)
-        self.declare_parameter("altitude_tolerance", 0.08)
-        self.declare_parameter("kp_z", 2.0)
-        self.declare_parameter("ki_z", 0.2)
-        self.declare_parameter("kd_zdot", 1.2)
-        self.declare_parameter("max_vz", 0.5)
-        self.declare_parameter("max_int", 0.6)
-        self.declare_parameter("min_altitude", 0.3)
-        self.declare_parameter("max_altitude", 1.4)
+        self.declare_parameter("target_altitude", 1.2)
+        self.declare_parameter("altitude_tolerance", 0.1)
+        self.declare_parameter("kp_z", 1.0)
+        self.declare_parameter("ki_z", 0.3)
+        self.declare_parameter("kd_zdot", 0.05)
+        self.declare_parameter("max_vz", 1.0)
+        self.declare_parameter("max_int", 0.5)
+        self.declare_parameter("min_altitude", 1.0)
+        self.declare_parameter("max_altitude", 2.2)
 
         # --- XY motion / avoidance ---
-        self.declare_parameter("linear_speed_fwd", 1.2)
+        self.declare_parameter("linear_speed_fwd", 1.6)
         self.declare_parameter("linear_speed_strafe", 0.6)
-        self.declare_parameter("angular_speed", 1.8)
-        self.declare_parameter("goal_tolerance", 0.5)
-        self.declare_parameter("obs_dist_thresh", 1.6)
-        self.declare_parameter("obs_clear_thresh", 2.0)
+        self.declare_parameter("angular_speed", 1.4)
+        self.declare_parameter("goal_tolerance", 0.6)
+        self.declare_parameter("obs_dist_thresh", 1.0)
+        self.declare_parameter("obs_clear_thresh", 1.0)
 
         # Waypoints (x,y)
         self.declare_parameter(
@@ -130,6 +130,12 @@ class MazeWanderNode(Node):
         self.have_pose = False
         self.locked_odom_topic: Optional[str] = None
         self.last_wait_log = 0.0
+
+        # Add these to __init__() under state variables
+        self.stuck_timer = 0.0
+        self.recovering = False
+        self.recovery_start = 0.0
+
 
         self.x = self.y = self.z = 0.0
         self.vx = self.vy = self.vz = 0.0
@@ -246,11 +252,11 @@ class MazeWanderNode(Node):
             return None
         if self.min_front < self.obs_thresh:
             if self.min_left > self.min_right:
-                return (0.3 * self.lin_fwd, +self.lin_strafe, +0.5 * self.ang_speed)
+                return (0.2 * self.lin_fwd, +self.lin_strafe, +0.5 * self.ang_speed)
             else:
-                return (0.3 * self.lin_fwd, -self.lin_strafe, -0.5 * self.ang_speed)
+                return (0.2 * self.lin_fwd, -self.lin_strafe, -0.5 * self.ang_speed)
         if self.min_front < self.obs_clear:
-            return (0.3 * self.lin_fwd, 0.0, 0.0)
+            return (0.2 * self.lin_fwd, 0.0, 0.0)
         return None
 
     # ----------------- Waypoints -----------------
@@ -283,8 +289,34 @@ class MazeWanderNode(Node):
         yaw_err = ang_norm(desired_yaw - self.yaw)
 
         avoid = self.avoidance_cmd()
+        now = time.time()
+
+        # --- Enhanced stuck detection ---
+        if abs(self.vx) < 0.05 and (self.min_front > 1.0 or not self.have_scan):
+            self.stuck_timer += dt
+        else:
+            self.stuck_timer = 0.0
+
+        if self.stuck_timer > 1.5 and not self.recovering:
+            self.recovering = True
+            self.recovery_start = now
+            self.get_logger().warn("[maze_wander_node] Stuck detected — initiating recovery")
 
         cmd = Twist()
+
+        # --- Recovery mode ---
+        if self.recovering:
+            if now - self.recovery_start < 1.5:
+                cmd.linear.x = -0.3
+                cmd.linear.y = 0.0
+                cmd.angular.z = +0.8 if self.min_left > self.min_right else -0.8
+                cmd.linear.z = vz
+                self.pub_cmd.publish(cmd)
+                return
+            else:
+                self.recovering = False
+
+        # --- Normal motion ---
         if avoid:
             vx, vy, yaw_rate = avoid
             cmd.linear.x = vx
@@ -304,6 +336,7 @@ class MazeWanderNode(Node):
                 f"front={self.min_front:.2f} L={self.min_left:.2f} R={self.min_right:.2f} wp={self.wp_idx} pose={'Y' if self.have_pose else 'N'}"
             )
             self.prev_log_t = now
+
 
     def destroy_node(self) -> bool:
         try:
