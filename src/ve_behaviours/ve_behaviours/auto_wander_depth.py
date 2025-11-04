@@ -96,7 +96,7 @@ class AutoWanderDepth(Node):
         self.declare_parameter("align_timeout_sec", 4.0)
         self.declare_parameter("scan_gate_timeout_sec", 6.0)
 
-        # ESCAPE maneuver after scan / watchdog
+        # ESCAPE manoeuvre after scan / watchdog
         self.declare_parameter("escape_backup_time", 3.5)    # quicker backup (was 3.5)
         self.declare_parameter("escape_backup_speed", 0.30)  # m/s reverse
         self.declare_parameter("escape_turn_time", 2.0)      # seconds pivot
@@ -105,7 +105,6 @@ class AutoWanderDepth(Node):
         
         # Image cropping fraction (controls how much of the frame is kept)
         self.declare_parameter("crop_center_fraction", 0.6)
-
 
         # ---------- Read params ----------
         self.cmd_vel_topic: str = self.get_parameter("cmd_vel_topic").value
@@ -259,15 +258,13 @@ class AutoWanderDepth(Node):
 
     def on_rgb(self, msg: Image) -> None:
         try:
+            # Keep full frame; we crop later where needed
             frame = self.bridge.imgmsg_to_cv2(msg, "bgr8")
-            # --- NEW: crop to central 60 % of the frame ---
-            frame = self._crop_central_roi(frame)
             self.rgb = frame
         except Exception as e:
             if self.throttle("rgb_fail", 2.0):
                 self.get_logger().warn(f"RGB conversion failed: {e}")
             self.rgb = None
-
 
     def on_odom(self, msg: Odometry) -> None:
         self.robot_xy = (float(msg.pose.pose.position.x), float(msg.pose.pose.position.y))
@@ -646,15 +643,33 @@ class AutoWanderDepth(Node):
 
             # Colour analysis on the cropped region only
             hsv = cv2.cvtColor(frame_cropped, cv2.COLOR_BGR2HSV)
+
+            # Green + red masks
             green = cv2.inRange(hsv, np.array([35, 60, 60]), np.array([85, 255, 255]))
             red = cv2.inRange(hsv, np.array([0, 90, 60]), np.array([10, 255, 255])) | \
                   cv2.inRange(hsv, np.array([170, 90, 60]), np.array([180, 255, 255]))
 
-            g_area, r_area = int(np.count_nonzero(green)), int(np.count_nonzero(red))
-            total = g_area + r_area or 1
+            g_area = int(np.count_nonzero(green))
+            r_area = int(np.count_nonzero(red))
+            total_rg = g_area + r_area
 
-            label = "red" if r_area > g_area else "green"
-            conf = max(r_area, g_area) / float(total)
+            if total_rg == 0:
+                red_ratio = 0.0
+            else:
+                red_ratio = r_area / float(total_rg)
+
+            # Decision rule: if >45% of the plant-coloured pixels are red → red
+            if red_ratio > 0.45:
+                label = "red"
+                conf = red_ratio
+            else:
+                label = "green"
+                conf = 1.0 - red_ratio
+
+            if self.throttle("class_dbg", 1.0):
+                self.get_logger().info(
+                    f"classify: r_area={r_area}, g_area={g_area}, red_ratio={red_ratio:.2f}, label={label}"
+                )
 
             idx = len(self.results) + 1
             path = os.path.join(self.scans_dir, f"{idx:02d}_{label}.png")
