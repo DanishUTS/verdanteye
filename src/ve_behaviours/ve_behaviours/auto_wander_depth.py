@@ -74,33 +74,31 @@ class AutoWanderDepth(Node):
         self.declare_parameter("restart_srv", "/ui/restart")
         self.declare_parameter("nav_goal_action", "navigate_to_pose")
         self.declare_parameter("goal_frame", "map")  # set to 'odom' if no localization
-        self.declare_parameter("standoff_m", 0.45)
+        self.declare_parameter("standoff_m", 0.55)
 
-        # LiDAR/safety & alignment
-        # CHANGED: more conservative bubble + wider sector + bigger scan window
-        self.declare_parameter("safety_stop_m", 0.45)        # was 0.30
-        self.declare_parameter("front_sector_deg", 45.0)     # was 30.0
-        self.declare_parameter("scan_min_m", 0.50)           # was 0.35
-        self.declare_parameter("scan_max_m", 0.90)           # was 0.80
+        # LiDAR/safety & alignment (SAFER DEFAULTS)
+        self.declare_parameter("safety_stop_m", 0.55)        # safer (was 0.45)
+        self.declare_parameter("front_sector_deg", 45.0)     # wider sector
+        self.declare_parameter("scan_min_m", 0.50)           # min scan distance
+        self.declare_parameter("scan_max_m", 1.30)           # wider window (was 0.90)
         self.declare_parameter("align_kp", 1.6)
-        self.declare_parameter("max_ang_vel", 0.8)
-        # CHANGED: creep a touch slower to avoid nose-in jams
-        self.declare_parameter("creep_lin_vel", 0.09)        # was 0.12
+        self.declare_parameter("max_ang_vel", 1.7)
+        self.declare_parameter("creep_lin_vel", 0.06)        # slower creep (was 0.09)
         self.declare_parameter("creep_allow", True)
-        self.declare_parameter("yaw_ok_deg", 7.0)
+        self.declare_parameter("yaw_ok_deg", 3.0)            # tighter yaw (was 7.0)
 
         # UI / timing
-        self.declare_parameter("scan_time_sec", 3.2)         # CHANGED slightly longer scan
+        self.declare_parameter("scan_time_sec", 2.5)         # shorter scan window (was 3.2)
         self.declare_parameter("publish_stop_twist", True)
         self.declare_parameter("align_timeout_sec", 4.0)
         self.declare_parameter("scan_gate_timeout_sec", 6.0)
 
-        # NEW: escape maneuver after each scan (and when watchdog trips)
-        self.declare_parameter("escape_backup_time", 3.5)    # seconds backing up
-        self.declare_parameter("escape_backup_speed", 0.25)  # m/s reverse
+        # ESCAPE maneuver after scan / watchdog
+        self.declare_parameter("escape_backup_time", 3.5)    # quicker backup (was 3.5)
+        self.declare_parameter("escape_backup_speed", 0.30)  # m/s reverse
         self.declare_parameter("escape_turn_time", 2.0)      # seconds pivot
-        self.declare_parameter("escape_turn_speed", 1.5)     # rad/s
-        self.declare_parameter("escape_min_clear_m", 1.40)   # desired clearance ahead to finish escape
+        self.declare_parameter("escape_turn_speed", 2.0)     # rad/s
+        self.declare_parameter("escape_min_clear_m", 1.20)   # smaller clearance ok (was 1.40)
 
         # ---------- Read params ----------
         self.cmd_vel_topic: str = self.get_parameter("cmd_vel_topic").value
@@ -157,7 +155,6 @@ class AutoWanderDepth(Node):
         self.align_timer = None
         self.scan_gate_timer = None
         self.watchdog_timer = None
-        # NEW: escape timers
         self.escape_timer = None
         self._escape_phase: str = ""   # "", "BACK", "TURN"
         self._escape_end_time: float = 0.0
@@ -192,7 +189,7 @@ class AutoWanderDepth(Node):
         # LiDAR watchdog @ 10 Hz
         self.watchdog_timer = self.create_timer(0.1, self._lidar_watchdog)
 
-        self.get_logger().info("auto_wander_depth ready: RGB+LiDAR, Nav2-integrated.")
+        self.get_logger().info("auto_wander_depth ready: RGB+LiDAR, Nav2-integrated (safe-creep + centered alignment).")
 
     # ---------------- Utilities ----------------
     def throttle(self, key: str, sec: float) -> bool:
@@ -227,7 +224,7 @@ class AutoWanderDepth(Node):
         return self._range_min_in(-half, +half)
 
     def side_clearance(self) -> Tuple[Optional[float], Optional[float]]:
-        # NEW: look at left/right wedges to decide turn direction for escape
+        # look at left/right wedges to decide turn direction for escape
         # Right: [-100, -40], Left: [40, 100] degrees
         rmin = self._range_min_in(-100.0, -40.0)
         lmin = self._range_min_in(+40.0, +100.0)
@@ -411,13 +408,15 @@ class AutoWanderDepth(Node):
         self._align_start_time = time.time()
         self.align_timer = self.create_timer(0.05, self._align_step)
 
+    # ---------- ALIGNMENT FIX (tighter + steady hold + damping) ----------
     def _align_step(self):
         if not self.current:
             return
         # desired yaw toward plant
         des = math.atan2(self.current.y - self.robot_xy[1], self.current.x - self.robot_xy[0])
         err = angle_wrap(des - self.robot_yaw)
-        yaw_ok = abs(math.degrees(err)) <= self.yaw_ok_deg
+        deg_err = abs(math.degrees(err))
+        yaw_ok = deg_err <= self.yaw_ok_deg  # uses param (default 3 deg)
 
         # stop if timeout
         if time.time() - getattr(self, "_align_start_time", 0.0) > self.align_timeout_sec:
@@ -426,13 +425,22 @@ class AutoWanderDepth(Node):
             self._open_scan_gate()
             return
 
-        # simple P controller on yaw, no linear motion while aligning
+        # simple P controller on yaw with damping, no linear motion while aligning
         cmd = Twist()
-        cmd.angular.z = clamp(self.align_kp * err, -self.max_ang_vel, self.max_ang_vel)
+        cmd.angular.z = clamp(self.align_kp * err, -self.max_ang_vel, self.max_ang_vel) * 0.8  # damping
         self.pub_cmd.publish(cmd)
 
+        # must hold alignment steadily for 0.3s
+        now = time.time()
         if yaw_ok:
-            self._open_scan_gate()
+            if not hasattr(self, "_yaw_hold_start"):
+                self._yaw_hold_start = now
+            elif now - self._yaw_hold_start > 0.3:
+                self._open_scan_gate()
+                del self._yaw_hold_start
+        else:
+            if hasattr(self, "_yaw_hold_start"):
+                del self._yaw_hold_start
 
     def _open_scan_gate(self):
         # stop turning and decide whether to creep
@@ -468,6 +476,15 @@ class AutoWanderDepth(Node):
 
         # capture if both ready OR timeout fallthrough
         timed_out = (time.time() - getattr(self, "_scan_start_time", 0.0)) > self.scan_time_sec
+
+        # NEW: early safety check before watchdog — prevents nose-in bump
+        if r is not None and r < self.safety_stop_m * 1.2:
+            self._publish_stop()
+            if self.throttle("pre_escape", 2.0):
+                self.get_logger().warn(f"⚠️ Too close ({r:.2f} m) — triggering ESCAPE early.")
+            self._start_escape(pending_next="MOVE")
+            return
+
         if (yaw_ok and in_window) or timed_out:
             self._publish_stop()
             if self.scan_timer:
@@ -502,7 +519,7 @@ class AutoWanderDepth(Node):
         self._analyze_and_record(frame, gx, gy)
 
         # After capture, perform ESCAPE so we don't get stuck turning in place
-        self.state = "ESCAPE"   # NEW
+        self.state = "ESCAPE"
         self._start_escape(pending_next="MOVE")  # after escape, resume MOVE/next target
 
     # ---------------- ESCAPE (NEW) ----------------
