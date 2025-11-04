@@ -115,7 +115,7 @@ def generate_launch_description():
         executable='rviz2',
         output='screen',
         parameters=[{'use_sim_time': use_sim_time}],
-        arguments=['-d', PathJoinSubstitution([config_ignition,
+        arguments=['-d', PathJoinSubstitution([config_x3,
                                                '41068.rviz'])],
         condition=IfCondition(LaunchConfiguration('rviz'))
     )
