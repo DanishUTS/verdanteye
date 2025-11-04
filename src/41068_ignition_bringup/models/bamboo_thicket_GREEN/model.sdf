@@ -7,15 +7,29 @@
       <visual name="visual">
         <geometry>
           <mesh>
+            <!-- Use the green bamboo mesh -->
             <uri>meshes/GREEN.dae</uri>
-            <scale>0.03 0.03 0.03</scale>
+            <scale>0.02 0.02 0.02</scale>
           </mesh>
         </geometry>
         <cast_shadows>false</cast_shadows>
       </visual>
+
+      <!-- Changed collision from box to cylinder -->
       <collision name="collision">
-        <geometry><box><size>0.2 0.2 0.2</size></box></geometry>
+        <geometry>
+          <cylinder>
+            <radius>0.4</radius>   <!-- Adjust radius to match bamboo base -->
+            <length>4.0</length>   <!-- Height of the cylinder -->
+          </cylinder>
+        </geometry>
+        <surface>
+          <contact>
+            <collide_bitmask>0x01</collide_bitmask>
+          </contact>
+        </surface>
       </collision>
+
     </link>
   </model>
 </sdf>

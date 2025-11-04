@@ -193,9 +193,8 @@ def generate_launch_description():
             'run_enabled_topic': '/ui/run_enabled',
             'restart_srv': '/ui/restart',
             'nav_goal_action': 'navigate_to_pose',
-            'standoff_m': 0.8,
-            'close_distance_m': 0.4,
-            'scan_time_sec': 3.0
+            'standoff_m': 0.6,
+            'scan_time_sec': 5.0
         }]
     )
 

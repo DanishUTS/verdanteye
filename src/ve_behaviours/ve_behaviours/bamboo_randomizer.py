@@ -64,7 +64,7 @@ def _radius_for(name: str, uri: str) -> float:
     if name.startswith("platypus"):
         return 0.6
     if name.startswith("bamboo_thicket"):
-        return 0.6
+        return 0.1
     if name.startswith("forest_wall"):
         return 0.9
     return 0.8
@@ -133,7 +133,7 @@ class BambooRandomizer(Node):
         self.declare_parameter("num", 6)
         self.declare_parameter("seed", 0)
         self.declare_parameter("min_spacing", 1.8)
-        self.declare_parameter("wall_margin", 1.0)
+        self.declare_parameter("wall_margin", 0.5)
         self.declare_parameter("husky_exclusion_radius", 2.5)
         self.declare_parameter("delete_existing_bamboo", True)
         self.declare_parameter("z_height", 0.0)
