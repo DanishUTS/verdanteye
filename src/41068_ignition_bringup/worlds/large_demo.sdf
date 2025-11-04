@@ -241,14 +241,7 @@
       <pose>-2.27195 -8.68441 0 0 -0 0.9</pose>
     </include>
 
-    <!-- Platypus -->
-    <include>
-      <uri>
-        https://fuel.gazebosim.org/1.0/OpenRobotics/models/platypus
-      </uri>
-      <name>platypus1</name>
-      <pose>-10 5 0 0 0 0</pose>
-    </include>
+    
 
     <!-- Rocks -->
     <include>
