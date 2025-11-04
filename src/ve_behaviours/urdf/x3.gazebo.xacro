@@ -325,4 +325,17 @@
         </plugin>
     </gazebo>
 
+    <gazebo>
+        <plugin
+            filename="ignition-gazebo-pose-publisher-system"
+            name="ignition::gazebo::systems::PosePublisher">
+            <publish_link_pose>false</publish_link_pose>
+            <publish_model_pose>true</publish_model_pose>
+            <use_custom_namespace>true</use_custom_namespace>
+            <namespace>X3</namespace>
+            <static_pose_publisher>true</static_pose_publisher>
+            <update_frequency>30</update_frequency>
+        </plugin>
+    </gazebo>
+
 </robot>
