@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import sys, math, json
 from pathlib import Path
+from typing import List
 
 import rclpy
 from rclpy.node import Node
@@ -103,7 +104,7 @@ class RobotUI(Node):
         gallery_wrap.addWidget(glabel)
 
         self.grid = QGridLayout(); self.grid.setHorizontalSpacing(12); self.grid.setVerticalSpacing(12)
-        self.cells: list[GalleryCell] = []
+        self.cells: List[GalleryCell] = []
         for i in range(2):
             for j in range(3):
                 cell = GalleryCell(); self.grid.addWidget(cell, i, j); self.cells.append(cell)
@@ -115,6 +116,10 @@ class RobotUI(Node):
 
         self.items = []
         self.x = self.y = self.theta = 0.0
+        self._stop_burst_remaining = 0
+        self._stop_timer = QTimer()
+        self._stop_timer.setInterval(60)
+        self._stop_timer.timeout.connect(self._stop_burst_tick)
 
         # Redraw timer to keep Qt responsive alongside rclpy
         self.timer = QTimer(); self.timer.timeout.connect(self._safe_spin); self.timer.start(10)
@@ -136,12 +141,14 @@ class RobotUI(Node):
                 self.cells[i].clear()
 
     def on_start(self):
+        if self._stop_timer.isActive():
+            self._stop_timer.stop()
         self.run_pub.publish(Bool(data=True))
         self.label.setText("Status: Running"); self.label.setStyleSheet("font-size: 22px; color: #10b981; font-weight: 700;")
 
     def on_stop(self):
         self.run_pub.publish(Bool(data=False))
-        self.cmd_pub.publish(Twist())
+        self._queue_stop_twists()
         self.label.setText("Status: Stopped"); self.label.setStyleSheet("font-size: 22px; color: #ff5555; font-weight: 700;")
 
     def on_restart(self):
@@ -152,6 +159,23 @@ class RobotUI(Node):
                 rclpy.spin_until_future_complete(self, fut, timeout_sec=2.0)
             except Exception:
                 pass
+
+    def _queue_stop_twists(self):
+        # send a short burst of zero twists so controllers actually halt
+        self._stop_burst_remaining = max(self._stop_burst_remaining, 10)
+        self._emit_stop_twist()
+        if not self._stop_timer.isActive():
+            self._stop_timer.start()
+
+    def _emit_stop_twist(self):
+        self.cmd_pub.publish(Twist())
+
+    def _stop_burst_tick(self):
+        if self._stop_burst_remaining <= 0:
+            self._stop_timer.stop()
+            return
+        self._stop_burst_remaining -= 1
+        self._emit_stop_twist()
 
     def odom_callback(self, msg: Odometry):
         p = msg.pose.pose.position

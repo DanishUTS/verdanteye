@@ -201,7 +201,7 @@ def generate_launch_description():
     # Delay UIs + scanner until randomizer finishes spawning
     ld.add_action(TimerAction(period=8.0, actions=[
         ui_control,
-        ui_plants,
+        #ui_plants,
         auto_scan
     ]))
 

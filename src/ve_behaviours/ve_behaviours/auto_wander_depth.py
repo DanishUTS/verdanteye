@@ -242,9 +242,16 @@ class AutoWanderDepth(Node):
 
     # ---------------- Callbacks ----------------
     def on_run_enabled(self, msg: Bool) -> None:
+        prev = self.run_enabled
         self.run_enabled = bool(msg.data)
         if self.throttle("re", 1.0):
             self.get_logger().info(f"{self.run_enabled_topic} = {self.run_enabled}")
+        if not self.run_enabled:
+            self._enter_pause_state()
+            return
+        if not prev and self.run_enabled and self.state == "PAUSED":
+            self.get_logger().info("▶️ Resuming auto_wander_depth from pause.")
+            self._resume_after_pause()
         if self.run_enabled and self.targets_raw and not self.remaining_targets:
             self.remaining_targets = self.targets_raw.copy()
             self._move_to_next_target()
@@ -300,6 +307,36 @@ class AutoWanderDepth(Node):
         self._publish_stop()
         self.get_logger().info("🔄 Restarted scanner (targets preserved).")
         return Trigger.Response(success=True, message="Restarted.")
+
+    def _enter_pause_state(self) -> None:
+        # stop motion immediately
+        self._publish_stop()
+        # cancel active timers
+        for t in (self.timeout_timer, self.scan_timer, self.align_timer,
+                  self.scan_gate_timer, self.escape_timer):
+            if t:
+                t.cancel()
+        self.timeout_timer = self.scan_timer = self.align_timer = self.scan_gate_timer = self.escape_timer = None
+        # cancel Nav2 goal if active
+        if self.goal_handle is not None:
+            try:
+                self.goal_handle.cancel_goal_async()
+            except Exception:
+                pass
+            self.goal_handle = None
+        # push current target back for later
+        if self.current is not None:
+            self.remaining_targets.insert(0, self.current)
+            self.current = None
+        self.state = "PAUSED"
+
+    def _resume_after_pause(self) -> None:
+        self._publish_stop()
+        if self.remaining_targets:
+            self.state = "MOVE"
+            self._move_to_next_target()
+        else:
+            self.state = "IDLE"
 
     # ---------------- Nav2 drive -> scan ----------------
     def _move_to_next_target(self) -> None:
