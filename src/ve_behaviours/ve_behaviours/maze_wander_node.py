@@ -76,12 +76,12 @@ class MazeWanderNode(Node):
         self.declare_parameter("max_altitude", 2.2)
 
         # --- XY motion / avoidance ---
-        self.declare_parameter("linear_speed_fwd", 1.6)
-        self.declare_parameter("linear_speed_strafe", 0.6)
-        self.declare_parameter("angular_speed", 1.4)
-        self.declare_parameter("goal_tolerance", 0.6)
-        self.declare_parameter("obs_dist_thresh", 1.0)
-        self.declare_parameter("obs_clear_thresh", 1.0)
+        self.declare_parameter("linear_speed_fwd", 1.8)
+        self.declare_parameter("linear_speed_strafe", 0.7)
+        self.declare_parameter("angular_speed", 1.3)
+        self.declare_parameter("goal_tolerance", 0.8)
+        self.declare_parameter("obs_dist_thresh", 0.8)
+        self.declare_parameter("obs_clear_thresh", 0.8)
 
         # Waypoints (x,y)
         self.declare_parameter(

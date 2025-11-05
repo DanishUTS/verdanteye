@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<sdf version="1.8">
+  <model name="bamboo_thicket_YELLOW">
+    <static>true</static>
+    <self_collide>false</self_collide>
+    <link name="link">
+      <visual name="visual">
+        <geometry>
+          <mesh>
+            <!-- Use the green bamboo mesh -->
+            <uri>meshes/YELLOW.dae</uri>
+            <scale>0.02 0.02 0.02</scale>
+          </mesh>
+        </geometry>
+        <cast_shadows>false</cast_shadows>
+      </visual>
+
+      <!-- Changed collision from box to cylinder -->
+      <collision name="collision">
+        <geometry>
+          <cylinder>
+            <radius>0.4</radius>   <!-- Adjust radius to match bamboo base -->
+            <length>4.0</length>   <!-- Height of the cylinder -->
+          </cylinder>
+        </geometry>
+        <surface>
+          <contact>
+            <collide_bitmask>0x01</collide_bitmask>
+          </contact>
+        </surface>
+      </collision>
+
+    </link>
+  </model>
+</sdf>

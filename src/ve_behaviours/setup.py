@@ -54,6 +54,7 @@ setup(
             # NEW: separate checklist/gallery UI (only if you keep ui_plants.py)
             'ui_plants = ve_behaviours.ui_plants:main',
             'maze_wander_node = ve_behaviours.maze_wander_node:main',
+            'pathplanning = ve_behaviours.pathplanning:main',
         ],
     },
 )

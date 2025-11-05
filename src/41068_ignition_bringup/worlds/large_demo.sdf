@@ -241,171 +241,6 @@
       <pose>-2.27195 -8.68441 0 0 -0 0.9</pose>
     </include>
 
-    <!-- Collision cylinders to prevent Husky from driving through tree trunks -->
-    <model name="tree_colliders">
-      <static>true</static>
-      <pose>0 0 0 0 0 0</pose>
-
-      <!-- Oak trees -->
-      <link name="oak1_collision">
-        <collision name="oak1_collision">
-          <pose>-4.77393 12.2995 0.5 0 0 0</pose>
-          <geometry>
-            <cylinder>
-              <radius>0.85</radius>
-              <length>1.2</length>
-            </cylinder>
-          </geometry>
-        </collision>
-      </link>
-      <link name="oak2_collision">
-        <collision name="oak2_collision">
-          <pose>2.99444 -4.95498 0.5 0 0 0</pose>
-          <geometry>
-            <cylinder>
-              <radius>0.85</radius>
-              <length>1.2</length>
-            </cylinder>
-          </geometry>
-        </collision>
-      </link>
-      <link name="oak3_collision">
-        <collision name="oak3_collision">
-          <pose>-9.12426 -11.2689 0.5 0 0 0</pose>
-          <geometry>
-            <cylinder>
-              <radius>0.85</radius>
-              <length>1.2</length>
-            </cylinder>
-          </geometry>
-        </collision>
-      </link>
-      <link name="oak4_collision">
-        <collision name="oak4_collision">
-          <pose>4.21788 -1.41417 0.5 0 0 0</pose>
-          <geometry>
-            <cylinder>
-              <radius>0.85</radius>
-              <length>1.2</length>
-            </cylinder>
-          </geometry>
-        </collision>
-      </link>
-      <link name="oak5_collision">
-        <collision name="oak5_collision">
-          <pose>-6.26553 5.00575 0.5 0 0 0</pose>
-          <geometry>
-            <cylinder>
-              <radius>0.85</radius>
-              <length>1.2</length>
-            </cylinder>
-          </geometry>
-        </collision>
-      </link>
-      <link name="oak6_collision">
-        <collision name="oak6_collision">
-          <pose>-4.33701 1.32854 0.5 0 0 0</pose>
-          <geometry>
-            <cylinder>
-              <radius>0.85</radius>
-              <length>1.2</length>
-            </cylinder>
-          </geometry>
-        </collision>
-      </link>
-      <link name="oak7_collision">
-        <collision name="oak7_collision">
-          <pose>-0.620372 10 0.5 0 0 0</pose>
-          <geometry>
-            <cylinder>
-              <radius>0.85</radius>
-              <length>1.2</length>
-            </cylinder>
-          </geometry>
-        </collision>
-      </link>
-      <link name="oak8_collision">
-        <collision name="oak8_collision">
-          <pose>3.54698 5 0.5 0 0 0</pose>
-          <geometry>
-            <cylinder>
-              <radius>0.85</radius>
-              <length>1.2</length>
-            </cylinder>
-          </geometry>
-        </collision>
-      </link>
-
-      <!-- Pine trees -->
-      <link name="pine1_collision">
-        <collision name="pine1_collision">
-          <pose>6.05721 9.78933 0.5 0 0 0</pose>
-          <geometry>
-            <cylinder>
-              <radius>0.65</radius>
-              <length>1.2</length>
-            </cylinder>
-          </geometry>
-        </collision>
-      </link>
-      <link name="pine2_collision">
-        <collision name="pine2_collision">
-          <pose>-10.0184 8.85188 0.5 0 0 0</pose>
-          <geometry>
-            <cylinder>
-              <radius>0.65</radius>
-              <length>1.2</length>
-            </cylinder>
-          </geometry>
-        </collision>
-      </link>
-      <link name="pine3_collision">
-        <collision name="pine3_collision">
-          <pose>-4.62343 -12.5618 0.5 0 0 0</pose>
-          <geometry>
-            <cylinder>
-              <radius>0.65</radius>
-              <length>1.2</length>
-            </cylinder>
-          </geometry>
-        </collision>
-      </link>
-      <link name="pine4_collision">
-        <collision name="pine4_collision">
-          <pose>7.08738 1.33612 0.5 0 0 0</pose>
-          <geometry>
-            <cylinder>
-              <radius>0.65</radius>
-              <length>1.2</length>
-            </cylinder>
-          </geometry>
-        </collision>
-      </link>
-      <link name="pine5_collision">
-        <collision name="pine5_collision">
-          <pose>-4.64898 -3.0329 0.5 0 0 0</pose>
-          <geometry>
-            <cylinder>
-              <radius>0.65</radius>
-              <length>1.2</length>
-            </cylinder>
-          </geometry>
-        </collision>
-      </link>
-      <link name="pine6_collision">
-        <collision name="pine6_collision">
-          <pose>-2.27195 -8.68441 0.5 0 0 0</pose>
-          <geometry>
-            <cylinder>
-              <radius>0.65</radius>
-              <length>1.2</length>
-            </cylinder>
-          </geometry>
-        </collision>
-      </link>
-    </model>
-
-
     <!-- Rocks -->
     <include>
       <uri>
@@ -450,84 +285,41 @@
       <pose>-14 -12 0 0 0 0</pose>
     </include>
 
-    <!-- Collision primitives for rocks -->
-    <model name="rock_colliders">
-      <static>true</static>
-      <pose>0 0 0 0 0 0</pose>
+      <!-- Green Bamboo Cluster -->
+      <include>
+      <uri>model://bamboo_thicket_GREEN</uri>
+      <name>bamboo_thicket_GREEN_1</name>
+      <pose>0 -5 0 0 0 0</pose>
+      </include>
+      <include>
+      <uri>model://bamboo_thicket_GREEN</uri>
+      <name>bamboo_thicket_GREEN_2</name>
+      <pose>-9 6 0 0 0 0</pose>
+      </include>
 
-      <link name="rock1_collision">
-        <collision name="rock1_collision">
-          <pose>-6.30926 -8.38159 0.5 0 0 0</pose>
-          <geometry>
-            <cylinder>
-              <radius>0.6</radius>
-              <length>1.0</length>
-            </cylinder>
-          </geometry>
-        </collision>
-      </link>
+      <!-- Red Bamboo Cluster -->
+      <include>
+      <uri>model://bamboo_thicket_RED</uri>
+      <name>bamboo_thicket_RED_1</name>
+      <pose>5 1 0 0 0 0</pose>
+      </include>
+      <include>
+      <uri>model://bamboo_thicket_RED</uri>
+      <name>bamboo_thicket_RED_2</name>
+      <pose>-2 7 0 0 0 0</pose>
+      </include>
 
-      <link name="rock2_collision">
-        <collision name="rock2_collision">
-          <pose>-8.27162 -6.19647 0.5 0 0 0</pose>
-          <geometry>
-            <cylinder>
-              <radius>0.6</radius>
-              <length>1.0</length>
-            </cylinder>
-          </geometry>
-        </collision>
-      </link>
-
-      <link name="rock3_collision">
-        <collision name="rock3_collision">
-          <pose>-9.2841 -4.61803 0.5 0 0 0</pose>
-          <geometry>
-            <cylinder>
-              <radius>0.6</radius>
-              <length>1.0</length>
-            </cylinder>
-          </geometry>
-        </collision>
-      </link>
-
-      <link name="rock4_collision">
-        <collision name="rock4_collision">
-          <pose>-10 -12 0.5 0 0 0</pose>
-          <geometry>
-            <cylinder>
-              <radius>0.8</radius>
-              <length>1.0</length>
-            </cylinder>
-          </geometry>
-        </collision>
-      </link>
-
-      <link name="rock5_collision">
-        <collision name="rock5_collision">
-          <pose>-12 -12 0.5 0 0 0</pose>
-          <geometry>
-            <cylinder>
-              <radius>0.8</radius>
-              <length>1.0</length>
-            </cylinder>
-          </geometry>
-        </collision>
-      </link>
-
-      <link name="rock6_collision">
-        <collision name="rock6_collision">
-          <pose>-14 -12 0.5 0 0 0</pose>
-          <geometry>
-            <cylinder>
-              <radius>0.8</radius>
-              <length>1.0</length>
-            </cylinder>
-          </geometry>
-        </collision>
-      </link>
-
-    </model>
+      <!-- Yellow Bamboo Cluster -->
+      <include>
+      <uri>model://bamboo_thicket_YELLOW</uri>
+      <name>bamboo_thicket_YELLOW_1</name>
+      <pose>8 -3 0 0 0 0</pose>
+      </include>
+      <include>
+      <uri>model://bamboo_thicket_YELLOW</uri>
+      <name>bamboo_thicket_YELLOW_2</name>
+      <pose>-7 1 0 0 0 0</pose>
+      </include>
 
   </world>
 </sdf>
