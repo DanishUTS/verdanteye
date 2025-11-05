@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-import sys, math, json
+import sys, math, json, os, random, signal, subprocess
+from datetime import datetime
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool, String
-from std_srvs.srv import Trigger
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist
 
@@ -43,11 +43,10 @@ class RobotUI(Node):
     def __init__(self):
         super().__init__('ui')
 
-        # Publishers / services
+        # Publishers
         self.run_pub = self.create_publisher(Bool, '/ui/run_enabled', 10)
         # Publish directly to /cmd_vel (no mux required since Nav2 is disabled)
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
-        self.restart_cli = self.create_client(Trigger, '/ui/restart')
 
         # Pose from EKF odometry (works even when Nav2 is off)
         self.pose_sub = self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
@@ -69,6 +68,11 @@ class RobotUI(Node):
         self.label.setStyleSheet("font-size: 22px; color: #ff5555; font-weight: 700;")
         wr.addWidget(self.label)
 
+        self.sim_label = QLabel("Simulation: offline")
+        self.sim_label.setAlignment(Qt.AlignCenter)
+        self.sim_label.setStyleSheet("font-size: 16px; color:#fca5a5; font-weight:600;")
+        wr.addWidget(self.sim_label)
+
         self.coords = QLabel("Position: (x=0.00, y=0.00, θ=0.00)")
         self.coords.setStyleSheet("font-size: 14px; color:#a1a1aa;")
         self.coords.setAlignment(Qt.AlignCenter)
@@ -80,6 +84,14 @@ class RobotUI(Node):
         btn_style = ("font-size: 18px; font-weight: 700; color: white; padding: 10px 18px; border-radius: 10px;")
         btn_w, btn_h = 190, 54
 
+        self.btn_sim_start = QPushButton("🚀 LAUNCH SIM"); self.btn_sim_start.setFixedSize(btn_w, btn_h)
+        self.btn_sim_start.setStyleSheet(btn_style + "background-color: #2563eb;")
+        self.btn_sim_start.clicked.connect(self.on_sim_start); buttons_col.addWidget(self.btn_sim_start, alignment=Qt.AlignLeft)
+
+        self.btn_sim_stop = QPushButton("🛑 STOP SIM"); self.btn_sim_stop.setFixedSize(btn_w, btn_h)
+        self.btn_sim_stop.setStyleSheet(btn_style + "background-color: #ef4444;")
+        self.btn_sim_stop.clicked.connect(self.on_sim_stop); buttons_col.addWidget(self.btn_sim_stop, alignment=Qt.AlignLeft)
+
         self.btn_start = QPushButton("▶ START"); self.btn_start.setFixedSize(btn_w, btn_h)
         self.btn_start.setStyleSheet(btn_style + "background-color: #10b981;")
         self.btn_start.clicked.connect(self.on_start); buttons_col.addWidget(self.btn_start, alignment=Qt.AlignLeft)
@@ -87,10 +99,6 @@ class RobotUI(Node):
         self.btn_stop = QPushButton("⏹ STOP"); self.btn_stop.setFixedSize(btn_w, btn_h)
         self.btn_stop.setStyleSheet(btn_style + "background-color: #ef4444;")
         self.btn_stop.clicked.connect(self.on_stop); buttons_col.addWidget(self.btn_stop, alignment=Qt.AlignLeft)
-
-        self.btn_restart = QPushButton("🔁 RESTART"); self.btn_restart.setFixedSize(btn_w, btn_h)
-        self.btn_restart.setStyleSheet(btn_style + "background-color: #3b82f6;")
-        self.btn_restart.clicked.connect(self.on_restart); buttons_col.addWidget(self.btn_restart, alignment=Qt.AlignLeft)
 
         self.btn_close = QPushButton("❌ CLOSE"); self.btn_close.setFixedSize(btn_w, btn_h)
         self.btn_close.setStyleSheet(btn_style + "background-color: #6b7280;")
@@ -120,6 +128,18 @@ class RobotUI(Node):
         self._stop_timer = QTimer()
         self._stop_timer.setInterval(60)
         self._stop_timer.timeout.connect(self._stop_burst_tick)
+        self.sim_proc: Optional[subprocess.Popen] = None  # type: ignore[name-defined]
+        self._sim_log = None
+        self._sim_expect_shutdown = False
+        self._sim_marked_running = False
+        self.sim_launch_base = [
+            "ros2", "launch", "41068_ignition_bringup", "41068_ignition.launch.py",
+            "ui:=False", "rviz:=True"
+        ]
+        self._sim_check_timer = QTimer()
+        self._sim_check_timer.setInterval(1000)
+        self._sim_check_timer.timeout.connect(self._monitor_sim_process)
+        self._sim_check_timer.start()
 
         # Redraw timer to keep Qt responsive alongside rclpy
         self.timer = QTimer(); self.timer.timeout.connect(self._safe_spin); self.timer.start(10)
@@ -140,7 +160,131 @@ class RobotUI(Node):
             else:
                 self.cells[i].clear()
 
+    def on_sim_start(self):
+        if self._sim_running():
+            self.get_logger().info("Simulation already running.")
+            self.sim_label.setText("Simulation: running")
+            self.sim_label.setStyleSheet("font-size: 16px; color:#4ade80; font-weight:600;")
+            return
+        if self.sim_proc is not None and self.sim_proc.poll() is not None:
+            self._cleanup_sim_process(self.sim_proc.poll())
+
+        log_path = Path.home() / ".ros" / "verdant_sim_launch.log"
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        try:
+            self._sim_log = open(log_path, "a", buffering=1, encoding="utf-8")
+            self._sim_log.write(f"[{datetime.now().isoformat(timespec='seconds')}] Launching simulation...\n")
+        except Exception:
+            self._sim_log = None
+
+        seed_value = random.randint(1, 2**31 - 1)
+        launch_cmd = self.sim_launch_base + [f"bamboo_seed:={seed_value}"]
+
+        try:
+            self.sim_proc = subprocess.Popen(
+                launch_cmd,
+                stdout=self._sim_log or subprocess.DEVNULL,
+                stderr=subprocess.STDOUT if self._sim_log else subprocess.DEVNULL,
+                preexec_fn=os.setsid
+            )
+            self._sim_expect_shutdown = False
+            self._sim_marked_running = False
+            self.sim_label.setText("Simulation: launching…")
+            self.sim_label.setStyleSheet("font-size: 16px; color:#fde68a; font-weight:600;")
+        except Exception as exc:
+            self.get_logger().error(f"Failed to start simulation: {exc}")
+            if self._sim_log:
+                try:
+                    self._sim_log.write(f"[{datetime.now().isoformat(timespec='seconds')}] Launch failed: {exc}\n")
+                except Exception:
+                    pass
+            self._cleanup_sim_process(exit_code=None, failed=True)
+
+    def on_sim_stop(self):
+        self._request_sim_stop(force=False)
+
+    def _request_sim_stop(self, force: bool) -> None:
+        if self.sim_proc is None:
+            self.sim_label.setText("Simulation: offline")
+            self.sim_label.setStyleSheet("font-size: 16px; color:#fca5a5; font-weight:600;")
+            return
+        if not self._sim_running():
+            self._cleanup_sim_process(self.sim_proc.poll())
+            return
+
+        sig = signal.SIGINT if not force else signal.SIGKILL
+        self._sim_expect_shutdown = True
+        self.sim_label.setText("Simulation: stopping…" if not force else "Simulation: terminating…")
+        self.sim_label.setStyleSheet("font-size: 16px; color:#fca5a5; font-weight:600;")
+        try:
+            os.killpg(os.getpgid(self.sim_proc.pid), sig)
+        except ProcessLookupError:
+            self._cleanup_sim_process(self.sim_proc.poll())
+        except Exception as exc:
+            self.get_logger().warn(f"Failed to send signal {sig}: {exc}")
+            if not force:
+                self._request_sim_stop(force=True)
+
+    def _sim_running(self) -> bool:
+        return self.sim_proc is not None and self.sim_proc.poll() is None
+
+    def _monitor_sim_process(self):
+        if self.sim_proc is None:
+            return
+        exit_code = self.sim_proc.poll()
+        if exit_code is None:
+            if not self._sim_marked_running:
+                self.sim_label.setText("Simulation: running")
+                self.sim_label.setStyleSheet("font-size: 16px; color:#4ade80; font-weight:600;")
+                self._sim_marked_running = True
+            return
+        self._cleanup_sim_process(exit_code)
+
+    def _cleanup_sim_process(self, exit_code: Optional[int], failed: bool = False) -> None:
+        expected = self._sim_expect_shutdown
+        self._sim_expect_shutdown = False
+        self._sim_marked_running = False
+        if self.sim_proc is not None:
+            self.sim_proc = None
+        self._close_sim_log()
+
+        if failed:
+            self.sim_label.setText("Simulation: launch failed")
+            self.sim_label.setStyleSheet("font-size: 16px; color:#f87171; font-weight:600;")
+            return
+
+        if exit_code is None:
+            exit_code = 0
+        if exit_code == 0:
+            text = "Simulation: stopped" if expected else "Simulation: exited"
+            color = "#fca5a5" if expected else "#facc15"
+        else:
+            text = f"Simulation: crashed (code {exit_code})"
+            color = "#f87171"
+        self.sim_label.setText(text)
+        self.sim_label.setStyleSheet(f"font-size: 16px; color:{color}; font-weight:600;")
+
+    def _close_sim_log(self) -> None:
+        if self._sim_log:
+            try:
+                self._sim_log.write(f"[{datetime.now().isoformat(timespec='seconds')}] Simulation log closed.\n")
+            except Exception:
+                pass
+            try:
+                self._sim_log.close()
+            except Exception:
+                pass
+            self._sim_log = None
+
     def on_start(self):
+        if not self._sim_running():
+            self.get_logger().warn("Simulation is not running; launch it before starting automation.")
+            self.label.setText("Status: Sim offline")
+            self.label.setStyleSheet("font-size: 22px; color: #f97316; font-weight: 700;")
+            return
         if self._stop_timer.isActive():
             self._stop_timer.stop()
         self.run_pub.publish(Bool(data=True))
@@ -150,15 +294,6 @@ class RobotUI(Node):
         self.run_pub.publish(Bool(data=False))
         self._queue_stop_twists()
         self.label.setText("Status: Stopped"); self.label.setStyleSheet("font-size: 22px; color: #ff5555; font-weight: 700;")
-
-    def on_restart(self):
-        if self.restart_cli.wait_for_service(timeout_sec=1.0):
-            try:
-                from std_srvs.srv import Trigger
-                fut = self.restart_cli.call_async(Trigger.Request())
-                rclpy.spin_until_future_complete(self, fut, timeout_sec=2.0)
-            except Exception:
-                pass
 
     def _queue_stop_twists(self):
         # send a short burst of zero twists so controllers actually halt
@@ -189,10 +324,28 @@ class RobotUI(Node):
     def _safe_spin(self):
         if rclpy.ok():
             rclpy.spin_once(self, timeout_sec=0.01)
+        self._monitor_sim_process()
 
     def on_close(self):
         self.get_logger().info("🛑 Shutting down VerdantEye UI...")
-        self.app.quit(); self.destroy_node(); rclpy.shutdown(); sys.exit(0)
+        try:
+            self._stop_timer.stop()
+        except Exception:
+            pass
+        try:
+            self._sim_check_timer.stop()
+        except Exception:
+            pass
+        try:
+            self.timer.stop()
+        except Exception:
+            pass
+        self._request_sim_stop(force=True)
+        self._close_sim_log()
+        self.app.quit()
+        self.destroy_node()
+        rclpy.shutdown()
+        sys.exit(0)
 
 def main():
     rclpy.init()

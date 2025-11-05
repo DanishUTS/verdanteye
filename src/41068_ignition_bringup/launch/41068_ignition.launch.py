@@ -49,6 +49,8 @@ def generate_launch_description():
     rviz = LaunchConfiguration('rviz')
     nav2 = LaunchConfiguration('nav2')
     world = LaunchConfiguration('world')
+    ui_flag = LaunchConfiguration('ui')
+    bamboo_seed = LaunchConfiguration('bamboo_seed')
 
     ld.add_action(DeclareLaunchArgument(
         'use_sim_time', default_value='True', description='Use simulation time'))
@@ -61,6 +63,10 @@ def generate_launch_description():
         choices=['simple_trees', 'large_demo'],
         description='Which world to load')
     )
+    ld.add_action(DeclareLaunchArgument(
+        'ui', default_value='False', description='Launch VerdantEye UI bundle'))
+    ld.add_action(DeclareLaunchArgument(
+        'bamboo_seed', default_value='0', description='Seed for bamboo randomizer (0 = time-based)'))
 
     # === Robot Description (URDF/Xacro) ===
     robot_description = ParameterValue(
@@ -153,6 +159,7 @@ def generate_launch_description():
             'wall_margin': 1.0,
             'husky_exclusion_radius': 2.5,
             'delete_existing_bamboo': True,
+            'seed': bamboo_seed,
         }]
     )
     ld.add_action(TimerAction(period=5.0, actions=[bamboo_randomizer]))
@@ -164,7 +171,8 @@ def generate_launch_description():
         name='verdant_eye_ui',
         output='screen',
         emulate_tty=True,
-        parameters=[{'use_sim_time': use_sim_time}]
+        parameters=[{'use_sim_time': use_sim_time}],
+        condition=IfCondition(ui_flag)
     )
 
     # === UI (Plant Checklist Gallery) ===
@@ -174,7 +182,8 @@ def generate_launch_description():
         name='verdant_eye_gallery',
         output='screen',
         emulate_tty=True,
-        parameters=[{'use_sim_time': use_sim_time}]
+        parameters=[{'use_sim_time': use_sim_time}],
+        condition=IfCondition(ui_flag)
     )
 
     # === Auto Wander Depth (Nav2-integrated RGB scanner) ===
@@ -201,7 +210,7 @@ def generate_launch_description():
     # Delay UIs + scanner until randomizer finishes spawning
     ld.add_action(TimerAction(period=8.0, actions=[
         ui_control,
-        #ui_plants,
+        ui_plants,
         auto_scan
     ]))
 
