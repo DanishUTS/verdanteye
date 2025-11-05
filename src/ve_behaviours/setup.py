@@ -19,6 +19,7 @@ setup(
             'launch/x3.launch.py',
             'launch/wander_launch.py',
             'launch/bamboo_randomizer.launch.py',
+            'launch/path_view.launch.py',
         ]),
 
         ('share/' + package_name + '/assets', [
@@ -36,6 +37,9 @@ setup(
 
         (os.path.join('share', package_name, 'maps'),
          glob('maps/*')),
+
+        (os.path.join('share', package_name, 'tools'),
+         glob('tools/*')),
 
     ],
     install_requires=['setuptools'],
@@ -55,6 +59,7 @@ setup(
             'ui_plants = ve_behaviours.ui_plants:main',
             'maze_wander_node = ve_behaviours.maze_wander_node:main',
             'pathplanning = ve_behaviours.pathplanning:main',
+            'plan_markers = ve_behaviours.plan_markers:main',
         ],
     },
 )

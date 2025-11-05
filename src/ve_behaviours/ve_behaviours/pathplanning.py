@@ -1,43 +1,102 @@
 #!/usr/bin/env python3
-import rclpy, math, yaml, cv2, numpy as np
+# ve_behaviours/ve_behaviours/pathplanning.py
+#
+# Global path planner over a saved occupancy grid with auto map discovery.
+# - Auto-finds <package>/maps/forest.yaml (installed share or source tree).
+# - Orders targets from origin by Euclidean distance (closest → furthest).
+# - Builds inflated costmap (distance transform) for safer global A*.
+# - Goal tolerance: if goal cell is blocked, snap to nearest free within tol.
+# - Prints waypoints for each leg, publishes a single /planned_path for RViz.
+#
+# Params (all optional):
+#   map_yaml          (string)  if empty -> auto-find maps/forest.yaml
+#   targets_flat      (double[]) [x1,y1, x2,y2, ...] (default = your 6 targets)
+#   origin_xy         (double[]) [x0, y0]  (default [0.0, 0.0])
+#   goal_tolerance_m  (double)  default 1.0
+#   clearance_m       (double)  inflation radius (m), default 0.40
+#   spacing_m         (double)  waypoint spacing (m), default 0.75
+#   publish_path      (bool)    default True
+#
+from __future__ import annotations
+import os, math, yaml, cv2, numpy as np, rclpy
 from rclpy.node import Node
 from nav_msgs.msg import Path
 from geometry_msgs.msg import PoseStamped
+from pathlib import Path as P
+from typing import List, Tuple, Optional
 
-def world_to_px(meta, x, y):
-    res = meta['resolution']; ox, oy = meta['origin'][0], meta['origin'][1]
-    px = int((x - ox) / res); py = int((y - oy) / res)
-    return px, py
+# ---------- map <-> world helpers ----------
+def world_to_px(meta, x, y) -> Tuple[int,int]:
+    res = float(meta['resolution']); ox, oy = float(meta['origin'][0]), float(meta['origin'][1])
+    return int((x - ox) / res), int((y - oy) / res)
 
-def px_to_world(meta, px, py):
-    res = meta['resolution']; ox, oy = meta['origin'][0], meta['origin'][1]
-    x = ox + (px + 0.5) * res; y = oy + (py + 0.5) * res
-    return float(x), float(y)
+def px_to_world(meta, px, py) -> Tuple[float,float]:
+    res = float(meta['resolution']); ox, oy = float(meta['origin'][0]), float(meta['origin'][1])
+    return float(ox + (px + 0.5) * res), float(oy + (py + 0.5) * res)
 
-def bresenham_los(occ, a, b):
-    """Line-of-sight check on binary free=255 map; returns True if clear."""
-    x0,y0 = a; x1,y1 = b
-    dx = abs(x1-x0); dy = -abs(y1-y0)
-    sx = 1 if x0<x1 else -1; sy = 1 if y0<y1 else -1
-    err = dx + dy
-    x,y = x0,y0
-    while True:
-        if occ[y, x] != 255: return False
-        if x == x1 and y == y1: break
-        e2 = 2*err
-        if e2 >= dy: err += dy; x += sx
-        if e2 <= dx: err += dx; y += sy
-    return True
+# ---------- path utils ----------
+def respace(points_world: List[Tuple[float,float]], spacing: float) -> List[Tuple[float,float]]:
+    if len(points_world) < 2: return points_world
+    segs=[]; d=[0.0]
+    for i in range(len(points_world)-1):
+        ax,ay = points_world[i]; bx,by = points_world[i+1]
+        L = math.hypot(bx-ax, by-ay); segs.append(((ax,ay),(bx,by),L)); d.append(d[-1]+L)
+    total = d[-1]
+    if total < 1e-6: return points_world
+    n = max(2, int(total/spacing)+1)
+    targets = [i*total/(n-1) for i in range(n)]
+    out=[]; si=0; acc=0.0
+    for t in targets:
+        while si < len(segs) and acc + segs[si][2] < t:
+            acc += segs[si][2]; si += 1
+        if si >= len(segs): out.append(points_world[-1]); continue
+        (ax,ay),(bx,by),L = segs[si]; u = 0.0 if L<1e-6 else (t-acc)/L
+        out.append((ax + u*(bx-ax), ay + u*(by-ay)))
+    return out
 
-def astar(occ, start, goal):
-    """A* on binary free map with 8-connectivity, returns list of px points."""
+def choose_goal_within_tolerance(free_mask: np.ndarray, goal_px: Tuple[int,int], tol_px: int) -> Optional[Tuple[int,int]]:
+    h, w = free_mask.shape[:2]
+    gx, gy = goal_px
+    best = None; best_d2 = 1e18
+    r = tol_px
+    x0, x1 = max(0, gx-r), min(w-1, gx+r)
+    y0, y1 = max(0, gy-r), min(h-1, gy+r)
+    for y in range(y0, y1+1):
+        dy2 = (y-gy)*(y-gy)
+        for x in range(x0, x1+1):
+            d2 = (x-gx)*(x-gx) + dy2
+            if d2 <= r*r and free_mask[y,x] == 255 and d2 < best_d2:
+                best_d2, best = d2, (x,y)
+    return best
+
+def build_costmap(img_u8: np.ndarray, res: float, clearance_m: float) -> Tuple[np.ndarray, np.ndarray]:
+    """Return (free_u8, cost_f32) where 255=free in free_u8, and cost_f32 penalises proximity to obstacles."""
+    # Treat unknown (grey) as occupied
+    if img_u8.ndim == 3:
+        img_u8 = cv2.cvtColor(img_u8, cv2.COLOR_BGR2GRAY)
+    free = (img_u8 > 250).astype(np.uint8) * 255
+    px_clear = max(0, int(clearance_m / res))
+    if px_clear > 0:
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2*px_clear+1, 2*px_clear+1))
+        free = cv2.erode(free, k)
+    inv = (free == 255).astype(np.uint8)
+    dist = cv2.distanceTransform(inv, cv2.DIST_L2, 3)  # pixels
+    dist_m = dist * res
+    # Cost high near obstacles, ~1 when far. Smooth + bounded.
+    eps = 0.05
+    cost = 1.0 + 3.0 * (1.0 / (eps + dist_m)) * (eps)  # normalised so far->~1, near->~4
+    return free, cost.astype(np.float32)
+
+def astar_weighted(free_u8: np.ndarray, cost_f32: np.ndarray, start: Tuple[int,int], goal: Tuple[int,int]) -> List[Tuple[int,int]]:
+    """A* with 8-neighbour moves; traversal cost = step_len * 0.5*(cost[u]+cost[v])."""
     import heapq
-    if occ[start[1], start[0]] != 255 or occ[goal[1], goal[0]] != 255:
-        return []
-    w,h = occ.shape[1], occ.shape[0]
-    neigh = [(-1,0),(1,0),(0,-1),(0,1),(-1,-1),(-1,1),(1,-1),(1,1)]
+    h, w = free_u8.shape[:2]
+    sx, sy = start; gx, gy = goal
+    if not (0 <= sx < w and 0 <= sy < h and 0 <= gx < w and 0 <= gy < h): return []
+    if free_u8[sy, sx] != 255 or free_u8[gy, gx] != 255: return []
+    neigh = [(-1,0,1.0),(1,0,1.0),(0,-1,1.0),(0,1,1.0),(-1,-1,math.sqrt(2)),(-1,1,math.sqrt(2)),(1,-1,math.sqrt(2)),(1,1,math.sqrt(2))]
     g = {start:0.0}
-    f = {start:math.hypot(goal[0]-start[0], goal[1]-start[1])}
+    f = {start: math.hypot(gx-sx, gy-sy)}
     came = {}
     openh = [(f[start], start)]
     closed = set()
@@ -45,145 +104,200 @@ def astar(occ, start, goal):
         _, u = heapq.heappop(openh)
         if u in closed: continue
         if u == goal:
-            # reconstruct
             path=[u]
             while u in came:
                 u = came[u]; path.append(u)
             path.reverse(); return path
         closed.add(u)
-        for dx,dy in neigh:
-            vx, vy = u[0]+dx, u[1]+dy
+        ux, uy = u
+        for dx,dy,dl in neigh:
+            vx, vy = ux+dx, uy+dy
             if vx<0 or vy<0 or vx>=w or vy>=h: continue
-            if occ[vy, vx] != 255: continue
-            cost = g[u] + (1.0 if dx==0 or dy==0 else math.sqrt(2))
-            if cost < g.get((vx,vy), float('inf')):
-                g[(vx,vy)] = cost
+            if free_u8[vy, vx] != 255: continue
+            step_cost = dl * 0.5 * (cost_f32[uy,ux] + cost_f32[vy,vx])
+            c = g[u] + step_cost
+            if c < g.get((vx,vy), float('inf')):
+                g[(vx,vy)] = c
                 came[(vx,vy)] = u
-                hcost = math.hypot(goal[0]-vx, goal[1]-vy)
-                f[(vx,vy)] = cost + hcost
+                hcost = math.hypot(gx - vx, gy - vy)
+                f[(vx,vy)] = c + hcost
                 heapq.heappush(openh, (f[(vx,vy)], (vx,vy)))
     return []
 
-def shortcut_path(occ, path_px):
-    """Greedy shortcutting: keep points only when LOS fails."""
-    if not path_px: return []
-    out=[path_px[0]]
-    i=0
-    while i < len(path_px)-1:
-        j = len(path_px)-1
-        # find the furthest j we can see from i
-        while j > i+1 and not bresenham_los(occ, path_px[i], path_px[j]):
-            j -= 1
-        out.append(path_px[j])
-        i = j
-    return out
-
-def respace(points_world, spacing):
-    """Evenly space points along polyline; keep headings."""
-    if len(points_world) < 2: return points_world
-    # build cumulative lengths
-    segs=[]; dists=[0.0]
-    for i in range(len(points_world)-1):
-        ax,ay = points_world[i]; bx,by = points_world[i+1]
-        segs.append(((ax,ay),(bx,by), math.hypot(bx-ax, by-ay)))
-        dists.append(dists[-1]+segs[-1][2])
-    total = dists[-1]
-    if total < 1e-6: return points_world
-    n = max(2, int(total/spacing)+1)
-    target = [i*total/(n-1) for i in range(n)]
-    out=[]
-    si=0; acc=0.0
-    for t in target:
-        # advance to segment containing distance t
-        while si < len(segs) and acc + segs[si][2] < t:
-            acc += segs[si][2]; si += 1
-        if si >= len(segs): out.append(points_world[-1]); continue
-        a,b,L = segs[si]
-        u = 0.0 if L<1e-6 else (t-acc)/L
-        x = a[0] + u*(b[0]-a[0]); y = a[1] + u*(b[1]-a[1])
-        out.append((x,y))
-    return out
+# ---------- map auto-discovery ----------
+def resolve_map_yaml(default_name: str = "forest.yaml") -> P:
+    """
+    Try package share first (installed), then source tree next to this file.
+    Returns absolute Path, raises if not found.
+    """
+    # 1) Installed share: <prefix>/share/ve_behaviours/maps/forest.yaml
+    try:
+        from ament_index_python.packages import get_package_share_directory
+        share_dir = P(get_package_share_directory('ve_behaviours'))
+        candidate = (share_dir / 'maps' / default_name).resolve()
+        if candidate.is_file():
+            return candidate
+    except Exception:
+        pass
+    # 2) Source tree relative to this script: src/ve_behaviours/maps/forest.yaml
+    here = P(__file__).resolve()
+    # file layout in source: src/ve_behaviours/ve_behaviours/pathplanning.py
+    src_maps = (here.parent.parent / 'maps' / default_name).resolve()
+    if src_maps.is_file():
+        return src_maps
+    raise FileNotFoundError(f"Could not find {default_name} in package share or source maps folder.")
 
 class TargetPlanner(Node):
     def __init__(self):
         super().__init__('pathplanning')
-        self.declare_parameter('map_yaml', 'maps/my_map.yaml')
-        self.declare_parameter('targets', [[0.0,-5.0],[-9.0,6.0],[5.0,1.0],[-2.0,7.0],[8.0,-3.0],[-7.0,1.0]])
+
+        # ----- parameters -----
+        self.declare_parameter('map_yaml', '')  # if empty -> auto-find
+        self.declare_parameter('targets_flat', [0.0,-5.0, -9.0,6.0, 5.0,1.0, -2.0,7.0, 8.0,-3.0, -7.0,1.0])
+        self.declare_parameter('origin_xy', [0.0, 0.0])
+        self.declare_parameter('goal_tolerance_m', 1.0)
+        self.declare_parameter('clearance_m', 0.40)
         self.declare_parameter('spacing_m', 0.75)
-        self.declare_parameter('clearance_m', 0.4)
         self.declare_parameter('publish_path', True)
 
-        map_yaml = self.get_parameter('map_yaml').get_parameter_value().string_value
-        spacing = float(self.get_parameter('spacing_m').value)
+        # ----- resolve map -----
+        map_yaml = self.get_parameter('map_yaml').get_parameter_value().string_value.strip()
+        if map_yaml:
+            map_yaml_p = P(map_yaml)
+            if not map_yaml_p.is_absolute():
+                map_yaml_p = (P.cwd() / map_yaml_p).resolve()
+        else:
+            map_yaml_p = resolve_map_yaml("forest.yaml")
+
+        # Load map metadata & image
+        meta = yaml.safe_load(open(map_yaml_p, 'r'))
+        img_path = (map_yaml_p.parent / meta['image']).resolve()
+        img = cv2.imread(str(img_path), cv2.IMREAD_UNCHANGED)
+        if img is None:
+            raise RuntimeError(f"Failed to read map image: {img_path}")
+        if int(meta.get('negate', 0)) == 1:
+            img = 255 - img
+
+        res = float(meta['resolution'])
         clearance = float(self.get_parameter('clearance_m').value)
+        free_u8, cost_f32 = build_costmap(img, res, clearance)
 
-        # Load map
-        meta = yaml.safe_load(open(map_yaml,'r'))
-        img = cv2.imread(str((__import__('pathlib').Path(map_yaml).parent / meta['image'])), cv2.IMREAD_UNCHANGED)
-        if meta.get('negate',0)==1: img = 255 - img
-        # Build free map and erode for clearance
-        free = (img > 250).astype(np.uint8) * 255
-        px_clear = max(0, int(clearance / meta['resolution']))
-        if px_clear>0:
-            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2*px_clear+1, 2*px_clear+1))
-            free = cv2.erode(free, k)
+        # ----- targets & origin -----
+        flat = list(self.get_parameter('targets_flat').value)
+        if len(flat) % 2 != 0:
+            raise RuntimeError("targets_flat must have even length [x1,y1,x2,y2,...].")
+        targets = [(float(flat[i]), float(flat[i+1])) for i in range(0, len(flat), 2)]
+        ox, oy = list(self.get_parameter('origin_xy').value)
+        origin = (float(ox), float(oy))
 
-        targets = [tuple(map(float,t)) for t in self.get_parameter('targets').value]
-        # Plan pairwise
-        full_world=[]
-        for i in range(len(targets)-1):
-            sx,sy = targets[i]; gx,gy = targets[i+1]
-            s_px = world_to_px(meta, sx, sy)
-            g_px = world_to_px(meta, gx, gy)
-            path_px = astar(free, s_px, g_px)
+        # Order targets by Euclidean distance from origin
+        def ed2(p): return (p[0]-origin[0])**2 + (p[1]-origin[1])**2
+        ordered = sorted(targets, key=ed2)
+
+        print(f"\n# Using map: {map_yaml_p}")
+        print("# Visit order (closest → furthest from origin):")
+        for i, t in enumerate(ordered):
+            print(f"{i+1:02d}. ({t[0]:.2f}, {t[1]:.2f})  dist={math.hypot(t[0]-origin[0], t[1]-origin[1]):.2f} m")
+
+        spacing = float(self.get_parameter('spacing_m').value)
+        goal_tol_m = float(self.get_parameter('goal_tolerance_m').value)
+        tol_px = max(0, int(goal_tol_m / res))
+
+        # Snap origin to nearest free if needed
+        start_px = world_to_px(meta, origin[0], origin[1])
+        if free_u8[start_px[1], start_px[0]] != 255:
+            snap = choose_goal_within_tolerance(free_u8, start_px, max(tol_px, 2))
+            if snap is None:
+                raise RuntimeError(f"Origin {origin} is in collision and no free cell within {goal_tol_m} m.")
+            start_px = snap
+            origin = px_to_world(meta, *start_px)
+            self.get_logger().warn(f"Origin snapped to free at {origin}")
+
+        # Plan sequentially
+        current_px = start_px
+        stitched_world: List[Tuple[float,float]] = []
+        leg_counter = 0
+        for tgt in ordered:
+            goal_px = world_to_px(meta, tgt[0], tgt[1])
+            if free_u8[goal_px[1], goal_px[0]] != 255:
+                sub = choose_goal_within_tolerance(free_u8, goal_px, tol_px)
+                if sub is None:
+                    self.get_logger().warn(f"Goal {tgt} not reachable within {goal_tol_m} m — skipping.")
+                    continue
+                goal_px = sub
+
+            path_px = astar_weighted(free_u8, cost_f32, current_px, goal_px)
+            leg_counter += 1
             if not path_px:
-                self.get_logger().warn(f'No path from {targets[i]} to {targets[i+1]}')
+                self.get_logger().warn(f"[Leg {leg_counter}] No path from {px_to_world(meta, *current_px)} to {tgt} — skipped.")
                 continue
-            path_px = shortcut_path(free, path_px)
-            path_world = [px_to_world(meta, *p) for p in path_px]
-            path_world = respace(path_world, spacing)
-            # stitch (avoid duplicate)
-            if full_world and path_world:
-                if math.hypot(full_world[-1][0]-path_world[0][0], full_world[-1][1]-path_world[0][1])<1e-6:
-                    full_world.extend(path_world[1:])
-                else:
-                    full_world.extend(path_world)
-            else:
-                full_world.extend(path_world)
 
-        # Compute yaws
-        wps=[]
-        for i,(x,y) in enumerate(full_world):
-            if i < len(full_world)-1:
-                nx,ny = full_world[i+1]
+            # Greedy LOS shortcut
+            def los(a, b):
+                x0,y0 = a; x1,y1 = b
+                dx = abs(x1-x0); dy = -abs(y1-y0)
+                sx = 1 if x0<x1 else -1; sy = 1 if y0<y1 else -1
+                err = dx + dy; x,y = x0,y0
+                h,w = free_u8.shape[:2]
+                while True:
+                    if x<0 or y<0 or x>=w or y>=h or free_u8[y,x] != 255: return False
+                    if x==x1 and y==y1: break
+                    e2=2*err
+                    if e2>=dy: err+=dy; x+=sx
+                    if e2<=dx: err+=dx; y+=sy
+                return True
+
+            sp=[path_px[0]]; i=0
+            while i < len(path_px)-1:
+                j=len(path_px)-1
+                while j>i+1 and not los(path_px[i], path_px[j]):
+                    j-=1
+                sp.append(path_px[j]); i=j
+
+            path_world = [px_to_world(meta, *p) for p in sp]
+            path_world = respace(path_world, spacing)
+
+            print(f"\n# Leg {leg_counter}: {px_to_world(meta,*current_px)}  →  {tgt}  (via {len(path_world)} wps)")
+            print("#   idx     x (m)      y (m)    yaw (rad)")
+            leg_wps=[]
+            for k,(x,y) in enumerate(path_world):
+                yaw = math.atan2(path_world[k+1][1]-y, path_world[k+1][0]-x) if k < len(path_world)-1 else 0.0
+                leg_wps.append((x,y,yaw))
+                print(f"    {k:03d}   {x:8.3f}  {y:8.3f}   {yaw:7.3f}")
+
+            if not stitched_world:
+                stitched_world.extend([(x,y) for (x,y,_) in leg_wps])
+            else:
+                stitched_world.extend([(x,y) for (x,y,_) in leg_wps[1:]])
+
+            current_px = (sp[-1][0], sp[-1][1])
+
+        final_wps=[]
+        for i,(x,y) in enumerate(stitched_world):
+            if i < len(stitched_world)-1:
+                nx,ny = stitched_world[i+1]
                 yaw = math.atan2(ny-y, nx-x)
             else:
                 yaw = 0.0
-            wps.append((x,y,yaw))
+            final_wps.append((x,y,yaw))
 
-        # Print to terminal
-        print('\n# Waypoints (map frame): x y yaw_rad')
-        for i,(x,y,yaw) in enumerate(wps):
-            print(f'{i:03d}: {x:.3f} {y:.3f} {yaw:.3f}')
-        print(f'# Total waypoints: {len(wps)}\n')
+        print(f"\n# Total waypoints across all legs: {len(final_wps)}\n")
 
-        # Optional RViz preview
-        if bool(self.get_parameter('publish_path').value) and wps:
-            self.path_pub = self.create_publisher(Path, '/planned_path', 10)
-            path = Path(); path.header.frame_id = 'map'
-            for x,y,yaw in wps:
+        if bool(self.get_parameter('publish_path').value) and final_wps:
+            pub = self.create_publisher(Path, '/planned_path', 10)
+            msg = Path(); msg.header.frame_id = 'map'
+            for x,y,yaw in final_wps:
                 p = PoseStamped(); p.header.frame_id='map'
                 p.pose.position.x = x; p.pose.position.y = y
                 p.pose.orientation.z = math.sin(yaw/2.0); p.pose.orientation.w = math.cos(yaw/2.0)
-                path.poses.append(p)
-            self.path_pub.publish(path)
-            self.get_logger().info(f'Published /planned_path with {len(path.poses)} poses.')
+                msg.poses.append(p)
+            pub.publish(msg)
+            self.get_logger().info(f"Published /planned_path with {len(msg.poses)} poses.")
         rclpy.shutdown()
 
 def main():
     rclpy.init()
     TargetPlanner()
-    rclpy.spin(rclpy.node.Node('dummy'))  # immediately shutdown in __init__
 
 if __name__ == '__main__':
     main()

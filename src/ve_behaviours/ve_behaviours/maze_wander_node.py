@@ -65,7 +65,7 @@ class MazeWanderNode(Node):
         self.declare_parameter("pose_topic", "/X3/pose")  # NEW
 
         # --- Altitude control params ---
-        self.declare_parameter("target_altitude", 1.2)
+        self.declare_parameter("target_altitude", 1.3)
         self.declare_parameter("altitude_tolerance", 0.1)
         self.declare_parameter("kp_z", 1.0)
         self.declare_parameter("ki_z", 0.3)
@@ -77,21 +77,20 @@ class MazeWanderNode(Node):
 
         # --- XY motion / avoidance ---
         self.declare_parameter("linear_speed_fwd", 1.8)
-        self.declare_parameter("linear_speed_strafe", 0.7)
-        self.declare_parameter("angular_speed", 1.3)
+        self.declare_parameter("linear_speed_strafe", 1.0)
+        self.declare_parameter("angular_speed", 1.2)
         self.declare_parameter("goal_tolerance", 0.8)
-        self.declare_parameter("obs_dist_thresh", 0.8)
-        self.declare_parameter("obs_clear_thresh", 0.8)
+        self.declare_parameter("obs_dist_thresh", 1.2)
+        self.declare_parameter("obs_clear_thresh", 1.2)
 
         # Waypoints (x,y)
         self.declare_parameter(
             "waypoints",
             [ -11.0, 11.0, 10.0, 11.0,
-               10.0,  5.0, -11.0,  5.0,
-              -11.0,  4.0, 10.0,   4.0,
-               10.0,  0.0, -11.0,  0.0,
-              -11.0, -3.5, 11.0,  -3.5,
-               10.0, -8.0, -11.0, -8.0
+               10.0,  4.0, -10.0,  4.0,
+              -10.0,  -0.5, 10.0,  0.0,
+              10.0, -3.0, -11.0,  -3.0,
+               -11.0, -9.0, 10.0, -9.0
             ]
         )
 
