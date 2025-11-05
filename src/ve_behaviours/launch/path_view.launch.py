@@ -7,14 +7,34 @@ def generate_launch_description():
     pkg_share = get_package_share_directory('ve_behaviours')
     map_yaml = os.path.join(pkg_share, 'maps', 'forest.yaml')
 
+    # 1) Map server (lifecycle node)
     map_server = Node(
         package='nav2_map_server',
         executable='map_server',
         name='map_server',
         output='screen',
-        parameters=[{'yaml_filename': map_yaml, 'frame_id': 'map'}],
+        parameters=[{
+            'yaml_filename': map_yaml,
+            'frame_id': 'map',
+        }],
     )
 
+    # 2) Lifecycle manager to auto-configure/activate map_server
+    lifecycle_mgr = Node(
+        package='nav2_lifecycle_manager',
+        executable='lifecycle_manager',
+        name='lifecycle_manager_map',
+        output='screen',
+        parameters=[{
+            'autostart': True,
+            'node_names': ['map_server'],
+            # optional: make it retry on startup races
+            'bond_timeout': 0.0,
+            'timeout': 10.0,
+        }],
+    )
+
+    # 3) Your path planner
     pathplanning = Node(
         package='ve_behaviours',
         executable='pathplanning',
@@ -26,10 +46,11 @@ def generate_launch_description():
             'goal_tolerance_m': 1.0,
             'clearance_m': 0.40,
             'spacing_m': 0.75,
-            'publish_path': True,
+            'publish_path': True,  # consider publishing with TRANSIENT_LOCAL in code
         }],
     )
 
+    # 4) Waypoint markers (optional)
     markers = Node(
         package='ve_behaviours',
         executable='plan_markers',
@@ -37,12 +58,18 @@ def generate_launch_description():
         output='screen'
     )
 
+    # 5) RViz
     rviz = Node(
         package='rviz2',
         executable='rviz2',
         name='rviz2',
-        output='screen',
-        arguments=[]
+        output='screen'
     )
 
-    return LaunchDescription([map_server, pathplanning, markers, rviz])
+    return LaunchDescription([
+        map_server,
+        lifecycle_mgr,
+        pathplanning,
+        markers,
+        rviz
+    ])
