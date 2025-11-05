@@ -307,7 +307,7 @@ class TargetPlanner(Node):
 
         # Publish once to /planned_path so RViz (or your own marker node) can visualise.
         if bool(self.get_parameter('publish_path').value) and final_wps:
-            # NOTE: QoS is default (volatile). If you want late subscribers to get it,
+            # NOTE: QoS is default (volatile). If late subscribers need it,
             # switch this to TRANSIENT_LOCAL in code later.
             pub = self.create_publisher(Path, '/planned_path', 10)
             msg = Path(); msg.header.frame_id = 'map'
