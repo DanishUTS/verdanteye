@@ -10,7 +10,7 @@
 # ===============================================================
 
 from __future__ import annotations
-import os, math, json, time
+import os, math, json, time, xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -30,6 +30,7 @@ from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 from geometry_msgs.msg import PoseArray, PoseStamped, Pose, Twist
 from nav2_msgs.action import NavigateToPose
+from ament_index_python.packages import get_package_share_directory
 
 
 @dataclass
@@ -37,6 +38,52 @@ class Target:
     x: float
     y: float
     z: float = 0.0
+
+
+@dataclass
+class StaticObstacle:
+    name: str
+    x: float
+    y: float
+    radius: float
+
+
+def _parse_pose_xyz(pose_text: str) -> Tuple[float, float, float, float]:
+    parts = [float(p) for p in (pose_text or "0 0 0 0 0 0").split()]
+    parts += [0.0] * (6 - len(parts))
+    x, y, z, _, _, yaw = parts[:6]
+    return x, y, z, yaw
+
+
+def _load_includes_from_sdf(world_sdf_path: str) -> List[Tuple[str, str, str]]:
+    tree = ET.parse(world_sdf_path)
+    root = tree.getroot()
+    includes: List[Tuple[str, str, str]] = []
+    for inc in root.findall(".//include"):
+        name_el = inc.find("name")
+        uri_el = inc.find("uri")
+        pose_el = inc.find("pose")
+        name = (name_el.text if name_el is not None else "").strip()
+        uri = (uri_el.text if uri_el is not None else "").strip()
+        pose_text = (pose_el.text if pose_el is not None else "0 0 0 0 0 0").strip()
+        includes.append((name, uri, pose_text))
+    return includes
+
+
+def _radius_for(name: str, uri: str) -> float:
+    if name.startswith(("oak", "pine")):
+        return 1.4
+    if name.startswith("rock"):
+        return 0.8
+    if name.startswith("platypus"):
+        return 0.6
+    if name.startswith("bamboo_thicket"):
+        return 0.25
+    if name.startswith("forest_wall"):
+        return 0.9
+    if "crate" in name:
+        return 0.5
+    return 0.7
 
 
 def yaw_to_quat(yaw: float) -> Tuple[float, float, float, float]:
@@ -78,6 +125,7 @@ class AutoWanderDepth(Node):
         self.declare_parameter("nav_goal_action", "navigate_to_pose")
         self.declare_parameter("goal_frame", "map")  # set to 'odom' if no localization
         self.declare_parameter("standoff_m", 0.5)
+        self.declare_parameter("world_name", "large_demo")
 
         # LiDAR/safety & alignment (SAFER DEFAULTS)
         self.declare_parameter("safety_stop_m", 0.55)        # safer (was 0.45)
@@ -100,11 +148,14 @@ class AutoWanderDepth(Node):
         self.declare_parameter("escape_backup_time", 3.5)    # quicker backup (was 3.5)
         self.declare_parameter("escape_backup_speed", 0.30)  # m/s reverse
         self.declare_parameter("escape_turn_time", 2.0)      # seconds pivot
+        self.declare_parameter("escape_turn_min_time", 0.8)  # ensure we pivot long enough
         self.declare_parameter("escape_turn_speed", 2.0)     # rad/s
         self.declare_parameter("escape_min_clear_m", 1.20)   # smaller clearance ok (was 1.40)
         
         # Image cropping fraction (controls how much of the frame is kept)
         self.declare_parameter("crop_center_fraction", 0.6)
+        self.declare_parameter("use_world_obstacles", True)
+        self.declare_parameter("approach_clearance_min", 0.45)
 
         # ---------- Read params ----------
         self.cmd_vel_topic: str = self.get_parameter("cmd_vel_topic").value
@@ -135,15 +186,22 @@ class AutoWanderDepth(Node):
         self.escape_backup_time: float = float(self.get_parameter("escape_backup_time").value)
         self.escape_backup_speed: float = float(self.get_parameter("escape_backup_speed").value)
         self.escape_turn_time: float = float(self.get_parameter("escape_turn_time").value)
+        self.escape_turn_min_time: float = float(self.get_parameter("escape_turn_min_time").value)
         self.escape_turn_speed: float = float(self.get_parameter("escape_turn_speed").value)
         self.escape_min_clear_m: float = float(self.get_parameter("escape_min_clear_m").value)
 
         self.crop_center_fraction: float = float(self.get_parameter("crop_center_fraction").value)
+        self.world_name: str = str(self.get_parameter("world_name").value)
+        self.use_world_obstacles: bool = bool(self.get_parameter("use_world_obstacles").value)
+        self.approach_clearance_min: float = float(self.get_parameter("approach_clearance_min").value)
 
         os.makedirs(os.path.expanduser("~/.ros/plant_scans"), exist_ok=True)
         self.scans_dir = os.path.expanduser("~/.ros/plant_scans")
 
         # ---------- State ----------
+        self.world_obstacles: List[StaticObstacle] = (
+            self._load_world_obstacles(self.world_name) if self.use_world_obstacles else []
+        )
         self.bridge = CvBridge()
         self.rgb: Optional[np.ndarray] = None
         self.robot_xy: Tuple[float, float] = (0.0, 0.0)
@@ -156,6 +214,8 @@ class AutoWanderDepth(Node):
         self.results: List[dict] = []
         self.state: str = "IDLE"
         self.run_enabled: bool = False
+        self._scan_candidates: List[Tuple[float, float, float, float, float]] = []
+        self._active_scan: Optional[Tuple[float, float, float, float, float]] = None
 
         self.goal_handle = None
         self.timeout_timer = None
@@ -167,6 +227,7 @@ class AutoWanderDepth(Node):
         self._escape_phase: str = ""   # "", "BACK", "TURN"
         self._escape_end_time: float = 0.0
         self._pending_after_escape: Optional[str] = None  # next state hint
+        self._escape_turn_start: float = 0.0
 
         # LiDAR cache
         self.scan_msg: Optional[LaserScan] = None
@@ -198,6 +259,97 @@ class AutoWanderDepth(Node):
         self.watchdog_timer = self.create_timer(0.1, self._lidar_watchdog)
 
         self.get_logger().info("auto_wander_depth ready: RGB+LiDAR, Nav2-integrated (target-crop mode).")
+
+    def _load_world_obstacles(self, world_name: str) -> List[StaticObstacle]:
+        obstacles: List[StaticObstacle] = []
+        try:
+            bringup_share = get_package_share_directory("41068_ignition_bringup")
+        except Exception as e:
+            self.get_logger().warn(f"⚠️ Could not locate bringup package: {e}")
+            return obstacles
+
+        world_sdf_path = os.path.join(bringup_share, "worlds", f"{world_name}.sdf")
+        if not os.path.isfile(world_sdf_path):
+            self.get_logger().warn(f"⚠️ World SDF not found for obstacle map: {world_sdf_path}")
+            return obstacles
+
+        try:
+            includes = _load_includes_from_sdf(world_sdf_path)
+        except Exception as e:
+            self.get_logger().warn(f"⚠️ Failed parsing world SDF: {e}")
+            return obstacles
+
+        for name, uri, pose_text in includes:
+            if name == "forest_plane":
+                continue
+            x, y, _, _ = _parse_pose_xyz(pose_text)
+            radius = _radius_for(name, uri)
+            if radius <= 0.0:
+                continue
+            if name.startswith("rock"):
+                radius += 0.5
+            elif name.startswith("bamboo_thicket"):
+                radius += 0.15
+            obstacles.append(StaticObstacle(name=name, x=x, y=y, radius=radius))
+
+        if obstacles:
+            self.get_logger().info(f"Loaded {len(obstacles)} static obstacles for approach planning.")
+        return obstacles
+
+    def _clearance_at(self, x: float, y: float, target: Optional[Target]) -> float:
+        clearance = float("inf")
+        for obs in self.world_obstacles:
+            if target and obs.name.startswith("bamboo_thicket"):
+                if math.hypot(obs.x - target.x, obs.y - target.y) < 0.2:
+                    continue
+            dist = math.hypot(x - obs.x, y - obs.y) - obs.radius
+            clearance = dist if dist < clearance else clearance
+        for other in self.targets_raw:
+            if target is not None and other is target:
+                continue
+            dist = math.hypot(x - other.x, y - other.y) - 0.3
+            clearance = dist if dist < clearance else clearance
+        return clearance
+
+    def _plan_scan_candidates(self, target: Target, robot_xy: Tuple[float, float]) -> List[Tuple[float, float, float, float, float]]:
+        base_dx = target.x - robot_xy[0]
+        base_dy = target.y - robot_xy[1]
+        base_angle = math.atan2(base_dy, base_dx) if base_dx or base_dy else 0.0
+        angle_offsets = [0.0, math.radians(25.0), math.radians(-25.0),
+                         math.radians(45.0), math.radians(-45.0),
+                         math.radians(90.0), math.radians(-90.0),
+                         math.radians(135.0), math.radians(-135.0),
+                         math.pi]
+        extra_standoffs = [0.0, 0.25, 0.45]
+
+        candidates: List[Tuple[float, float, float, float, float, float]] = []
+        for extra in extra_standoffs:
+            standoff = max(0.3, self.standoff_m + extra)
+            for offset in angle_offsets:
+                ang = angle_wrap(base_angle + offset)
+                ux, uy = math.cos(ang), math.sin(ang)
+                sx = target.x - ux * standoff
+                sy = target.y - uy * standoff
+                clearance = self._clearance_at(sx, sy, target)
+                if math.isfinite(clearance) and clearance < self.approach_clearance_min:
+                    continue
+                align_penalty = abs(offset)
+                distance_penalty = extra * 0.6
+                base_score = clearance if math.isfinite(clearance) else 5.0
+                score = base_score - 0.2 * align_penalty - distance_penalty
+                candidates.append((score, sx, sy, ang, clearance, standoff))
+
+        if not candidates:
+            standoff = self.standoff_m + 0.4
+            ang = base_angle
+            ux, uy = math.cos(ang), math.sin(ang)
+            sx = target.x - ux * standoff
+            sy = target.y - uy * standoff
+            clearance = self._clearance_at(sx, sy, target)
+            candidates.append((-999.0, sx, sy, ang, clearance, standoff))
+
+        candidates.sort(key=lambda c: c[0], reverse=True)
+        return [(sx, sy, ang, clearance, standoff) for _, sx, sy, ang, clearance, standoff in candidates]
 
     # ---------------- Utilities ----------------
     def throttle(self, key: str, sec: float) -> bool:
@@ -289,6 +441,8 @@ class AutoWanderDepth(Node):
         self.scan_point = None
         self.results.clear()
         self.remaining_targets.clear()
+        self._scan_candidates.clear()
+        self._active_scan = None
 
         for t in (self.timeout_timer, self.scan_timer, self.align_timer, self.scan_gate_timer, self.escape_timer):
             if t:
@@ -296,6 +450,7 @@ class AutoWanderDepth(Node):
         self.timeout_timer = self.scan_timer = self.align_timer = self.scan_gate_timer = self.escape_timer = None
         self._escape_phase = ""
         self._pending_after_escape = None
+        self._escape_turn_start = 0.0
 
         if self.goal_handle is not None:
             try:
@@ -328,6 +483,10 @@ class AutoWanderDepth(Node):
         if self.current is not None:
             self.remaining_targets.insert(0, self.current)
             self.current = None
+        self.scan_point = None
+        self._scan_candidates.clear()
+        self._active_scan = None
+        self._escape_turn_start = 0.0
         self.state = "PAUSED"
 
     def _resume_after_pause(self) -> None:
@@ -353,15 +512,19 @@ class AutoWanderDepth(Node):
         self.state = "MOVE"
 
         gx, gy = next_target.x, next_target.y
-        dx, dy = gx - rx, gy - ry
-        dist = math.hypot(dx, dy) or 1e-6
-        ux, uy = dx / dist, dy / dist
-        sx, sy = gx - ux * self.standoff_m, gy - uy * self.standoff_m
+        candidates = self._plan_scan_candidates(next_target, (rx, ry))
+        chosen = candidates[0]
+        self._scan_candidates = candidates[1:]
+        sx, sy, approach_ang, clearance, standoff = chosen
         self.scan_point = (sx, sy)
+        self._active_scan = chosen
 
+        dist = math.hypot(gx - rx, gy - ry)
         if self.throttle("mv", 0.5):
+            clr_txt = f"{clearance:.2f}m" if math.isfinite(clearance) else "∞"
             self.get_logger().info(
-                f"🎯 Target ({gx:.2f},{gy:.2f}); scan point=({sx:.2f},{sy:.2f}); d={dist:.2f}m"
+                f"🎯 Target ({gx:.2f},{gy:.2f}); scan=({sx:.2f},{sy:.2f}) standoff={standoff:.2f} "
+                f"clearance={clr_txt}; d={dist:.2f}m"
             )
         self._send_nav_goal(sx, sy, face_x=gx, face_y=gy)
 
@@ -416,7 +579,19 @@ class AutoWanderDepth(Node):
         else:
             if self.throttle("goal_fail", 1.0):
                 self.get_logger().warn(f"Goal failed (status={getattr(result, 'status', '?')}); retrying scan point.")
-            if self.scan_point is not None:
+            if self._scan_candidates:
+                next_scan = self._scan_candidates.pop(0)
+                sx, sy, ang, clearance, standoff = next_scan
+                self.scan_point = (sx, sy)
+                self._active_scan = next_scan
+                if self.throttle("goal_retry", 1.5):
+                    clr_txt = f"{clearance:.2f}m" if math.isfinite(clearance) else "∞"
+                    self.get_logger().info(
+                        f"↻ Trying alternate scan point ({sx:.2f},{sy:.2f}) "
+                        f"standoff={standoff:.2f} clearance={clr_txt}"
+                    )
+                self._send_nav_goal(sx, sy, face_x=self.current.x, face_y=self.current.y)
+            elif self.scan_point is not None:
                 sx, sy = self.scan_point
                 self._send_nav_goal(sx, sy, face_x=self.current.x, face_y=self.current.y)
             else:
@@ -427,7 +602,8 @@ class AutoWanderDepth(Node):
             gx, gy = self.current.x, self.current.y
             rx, ry = self.robot_xy
             dist = math.hypot(gx - rx, gy - ry)
-            if dist <= self.standoff_m * 2.5:
+            active_standoff = self._active_scan[4] if self._active_scan else self.standoff_m
+            if dist <= active_standoff * 2.5:
                 if self.throttle("near_force", 2.0):
                     self.get_logger().warn(f"⏳ Timeout near plant ({dist:.2f} m) — forcing scan/align.")
                 self._enter_scan_mode()
@@ -444,6 +620,7 @@ class AutoWanderDepth(Node):
 
         self._publish_stop()
         self.state = "ALIGN"
+        self._scan_candidates.clear()
 
         # Begin yaw alignment loop, then open a scan gate
         self._start_align_loop()
@@ -570,6 +747,7 @@ class AutoWanderDepth(Node):
         self._pending_after_escape = pending_next
         self._escape_phase = "BACK"
         self._escape_end_time = time.time() + self.escape_backup_time
+        self._escape_turn_start = 0.0
 
         # begin periodic escape step
         if self.escape_timer:
@@ -600,6 +778,7 @@ class AutoWanderDepth(Node):
                 turn_right = (rmin or 0.0) > (lmin or 0.0)
                 self._escape_turn_sign = +1.0 if turn_right else -1.0
                 self._escape_phase = "TURN"
+                self._escape_turn_start = now
                 self._escape_end_time = now + self.escape_turn_time
                 if self.throttle("esc_turn", 1.0):
                     self.get_logger().info(f"↪️ ESCAPE: pivoting {'right' if turn_right else 'left'}...")
@@ -612,14 +791,17 @@ class AutoWanderDepth(Node):
             cmd.angular.z = self._escape_turn_sign * abs(self.escape_turn_speed)
             self.pub_cmd.publish(cmd)
 
+            elapsed_turn = now - self._escape_turn_start if self._escape_turn_start else 0.0
             front_clear = (r_front >= self.escape_min_clear_m)
-            if now >= self._escape_end_time or front_clear:
+            min_turn_reached = elapsed_turn >= self.escape_turn_min_time
+            if now >= self._escape_end_time or (front_clear and min_turn_reached):
                 # finish escape
                 self._publish_stop()
                 self._escape_phase = ""
                 if self.escape_timer:
                     self.escape_timer.cancel()
                     self.escape_timer = None
+                self._escape_turn_start = 0.0
                 # Resume workflow
                 next_state = self._pending_after_escape or "MOVE"
                 if next_state == "MOVE":
@@ -673,7 +855,7 @@ class AutoWanderDepth(Node):
 
     def _analyze_and_record(self, frame: Optional[np.ndarray], gx: float, gy: float) -> None:
         if frame is None:
-            label, conf, path = "green", 0.0, ""
+            label, conf, path, health_percent = "green", 0.0, "", 100
         else:
             # Crop to central region so we mostly see the target plant
             frame_cropped = self._crop_central_roi(frame)
@@ -681,31 +863,46 @@ class AutoWanderDepth(Node):
             # Colour analysis on the cropped region only
             hsv = cv2.cvtColor(frame_cropped, cv2.COLOR_BGR2HSV)
 
-            # Green + red masks
+            # Green / yellow / red masks (basic HSV buckets)
             green = cv2.inRange(hsv, np.array([35, 60, 60]), np.array([85, 255, 255]))
+            yellow = cv2.inRange(hsv, np.array([20, 80, 60]), np.array([35, 255, 255]))
             red = cv2.inRange(hsv, np.array([0, 90, 60]), np.array([10, 255, 255])) | \
                   cv2.inRange(hsv, np.array([170, 90, 60]), np.array([180, 255, 255]))
 
             g_area = int(np.count_nonzero(green))
+            y_area = int(np.count_nonzero(yellow))
             r_area = int(np.count_nonzero(red))
-            total_rg = g_area + r_area
+            total = g_area + y_area + r_area
 
-            if total_rg == 0:
+            if total == 0:
+                green_ratio = 1.0
+                yellow_ratio = 0.0
                 red_ratio = 0.0
             else:
-                red_ratio = r_area / float(total_rg)
+                green_ratio = g_area / float(total)
+                yellow_ratio = y_area / float(total)
+                red_ratio = r_area / float(total)
 
-            # Decision rule: if >45% of the plant-coloured pixels are red → red
-            if red_ratio > 0.45:
+            red_thresh = 0.30
+            yellow_thresh = 0.30
+
+            # Decision rules: require ~30% coverage for red/yellow
+            if red_ratio >= red_thresh:
                 label = "red"
                 conf = red_ratio
+            elif yellow_ratio >= yellow_thresh:
+                label = "yellow"
+                conf = yellow_ratio
             else:
                 label = "green"
-                conf = 1.0 - red_ratio
+                conf = green_ratio
+
+            health_percent = max(0, min(100, int(round(green_ratio * 100))))
 
             if self.throttle("class_dbg", 1.0):
                 self.get_logger().info(
-                    f"classify: r_area={r_area}, g_area={g_area}, red_ratio={red_ratio:.2f}, label={label}"
+                    "classify: g=%d (%.2f)  y=%d (%.2f)  r=%d (%.2f) -> %s"
+                    % (g_area, green_ratio, y_area, yellow_ratio, r_area, red_ratio, label)
                 )
 
             idx = len(self.results) + 1
@@ -722,7 +919,12 @@ class AutoWanderDepth(Node):
             "y": round(float(gy), 3),
             "color": label,
             "confidence": round(float(conf), 3),
-            "condition": "toxic" if label == "red" else "healthy",
+            "condition": (
+                "toxic" if label == "red"
+                else "stressed" if label == "yellow"
+                else "healthy"
+            ),
+            "health_percent": health_percent,
             "image_path": path
         }
         self.results.append(entry)

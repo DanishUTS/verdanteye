@@ -26,6 +26,13 @@ except Exception:
     HAS_GZ = False
 
 
+BAMBOO_MODEL_URIS: Tuple[str, str, str] = (
+    "model://bamboo_thicket_RED",
+    "model://bamboo_thicket_GREEN",
+    "model://bamboo_thicket_YELLOW",
+)
+
+
 # ----------------------------------------------------------------------
 # Utility helpers (unchanged from your original)
 # ----------------------------------------------------------------------
@@ -169,10 +176,36 @@ class BambooRandomizer(Node):
         ymax -= self.wall_margin
 
         obstacles = _build_obstacles(includes)
+        rock_obstacles: List[Obstacle] = []
+        for o in obstacles:
+            if o.name.startswith("rock"):
+                o.radius += 0.6  # widen keepout for rocks so bamboo stays clear
+                rock_obstacles.append(o)
         obstacles.append(Obstacle("husky_spawn", 0.0, 0.0, self.husky_exclusion_radius))
 
         if self.delete_existing_bamboo:
             self._delete_existing_bamboo([o.name for o in obstacles if o.name.startswith("bamboo_thicket_")])
+
+        center_x = (xmin + xmax) * 0.5
+        center_y = (ymin + ymax) * 0.5
+        sector_count = 12
+        sector_width = (2.0 * math.pi) / sector_count
+
+        def sector_index(px: float, py: float) -> int:
+            ang = math.atan2(py - center_y, px - center_x)
+            wrapped = (ang + math.pi) % (2.0 * math.pi)
+            return int(wrapped // sector_width)
+
+        blocked_sectors = set()
+        sector_buffer = 1  # also block immediate neighbours to keep wider gap
+        for rock in rock_obstacles:
+            idx = sector_index(rock.x, rock.y)
+            for offset in range(-sector_buffer, sector_buffer + 1):
+                blocked_sectors.add((idx + offset) % sector_count)
+        if len(blocked_sectors) >= sector_count:
+            blocked_sectors.clear()  # fall back to no sector constraints if fully masked
+        elif blocked_sectors:
+            self.get_logger().info(f"Rock keepout sectors: {sorted(blocked_sectors)}")
 
         # ---------------- Sample placements ----------------
         placements_xy: List[Tuple[float, float]] = []
@@ -184,12 +217,14 @@ class BambooRandomizer(Node):
             x = random.uniform(xmin, xmax)
             y = random.uniform(ymin, ymax)
 
+            if blocked_sectors and sector_index(x, y) in blocked_sectors:
+                continue
             if _too_close(x, y, obstacles, pad=0.2):
                 continue
             if _too_close_xy(x, y, placements_xy, self.min_spacing):
                 continue
 
-            uri = "model://bamboo_thicket_RED" if random.random() < 0.5 else "model://bamboo_thicket_GREEN"
+            uri = random.choice(BAMBOO_MODEL_URIS)
             placements_xy.append((x, y))
             colors_uri.append(uri)
 

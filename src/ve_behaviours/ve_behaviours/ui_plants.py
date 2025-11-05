@@ -15,9 +15,33 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QPixmap
 from PyQt5.QtCore import Qt, QTimer
 
+HEALTH_DESCRIPTORS = [
+    (20, "Critical failure — immediate intervention required."),
+    (40, "Severely stressed — remediate as soon as possible."),
+    (60, "Moderately stressed — monitor closely and treat."),
+    (80, "Mild stress — plant should recover with care."),
+    (101, "Healthy — keep routine checks.")
+]
+
+
+def describe_health(percent: float) -> str:
+    for threshold, text in HEALTH_DESCRIPTORS:
+        if percent < threshold:
+            return text
+    return HEALTH_DESCRIPTORS[-1][1]
+
+
 @dataclass
 class Item:
-    id: int; image_path: str; color: str; condition: str; conf: float; x: float; y: float; name: str
+    id: int
+    image_path: str
+    color: str
+    condition: str
+    conf: float
+    x: float
+    y: float
+    name: str
+    health: int = 0
 
 class ChecklistUI(Node):
     def __init__(self):
@@ -50,11 +74,26 @@ class ChecklistUI(Node):
         except Exception as e: self.get_logger().warn(f"Bad JSON: {e}"); return
         self.items.clear()
         for it in data.get("items", []):
+            pose = it.get("pose", {})
+            x_val = pose.get("x", it.get("x", 0.0))
+            y_val = pose.get("y", it.get("y", 0.0))
+            health_raw = it.get("health_percent", it.get("health", 0))
+            try:
+                health_num = float(health_raw)
+            except Exception:
+                health_num = 0.0
+            health_val = int(max(0, min(100, round(health_num))))
+
             self.items.append(Item(
-                id=int(it.get("id", 0)), image_path=str(it.get("image_path","")), color=str(it.get("color","green")),
-                condition=str(it.get("condition","healthy")), conf=float(it.get("confidence",0.0)),
-                x=float(it.get("pose",{}).get("x",0.0)), y=float(it.get("pose",{}).get("y",0.0)),
-                name=str(it.get("bamboo_name",""))
+                id=int(it.get("id", 0)),
+                image_path=str(it.get("image_path", "")),
+                color=str(it.get("color", "green")),
+                condition=str(it.get("condition", "healthy")),
+                conf=float(it.get("confidence", 0.0)),
+                x=float(x_val),
+                y=float(y_val),
+                name=str(it.get("bamboo_name", "")),
+                health=health_val
             ))
         self.refresh_grid()
 
@@ -76,9 +115,23 @@ class ChecklistUI(Node):
         else:
             img.setStyleSheet("background:#202020; border:1px solid #333;"); img.setText("(no image)"); img.setAlignment(Qt.AlignCenter)
         v.addWidget(img)
-        text = QLabel(f"Plant #{it.id}  {('🔴 Toxic' if it.color=='red' else '🟢 Healthy')}  "
-                      f"{round(it.conf*100)}%  at (x={it.x:.2f}, y={it.y:.2f})")
-        text.setStyleSheet("font-size:16px; color:#d0d0d0;"); v.addWidget(text)
+        if it.color == "red":
+            status = "🔴 Toxic"
+        elif it.color == "yellow":
+            status = "🟡 Stressed"
+        else:
+            status = "🟢 Healthy"
+
+        title = QLabel(
+            f"Plant #{it.id}  {status}  "
+            f"confidence {round(it.conf * 100)}%  at (x={it.x:.2f}, y={it.y:.2f})"
+        )
+        title.setStyleSheet("font-size:16px; color:#d0d0d0;")
+        v.addWidget(title)
+
+        desc = QLabel(f"Health {it.health}% — {describe_health(it.health)}")
+        desc.setStyleSheet("font-size:14px; color:#a0a0a0;")
+        v.addWidget(desc)
         return w
 
     def export_csv(self):
