@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import sys, math, json, os, random, signal, subprocess
+import sys, math, json, os, random, signal, subprocess, time
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
@@ -11,33 +11,9 @@ from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist
 
 from PyQt5.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
-    QGridLayout, QFrame
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel
 )
-from PyQt5.QtGui import QPixmap
 from PyQt5.QtCore import Qt, QTimer
-
-class GalleryCell(QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(6, 6, 6, 6)
-        self.pic = QLabel(); self.pic.setFixedSize(260, 160); self.pic.setAlignment(Qt.AlignCenter)
-        self.caption = QLabel("—"); self.caption.setAlignment(Qt.AlignCenter)
-        self.caption.setStyleSheet("font-size: 14px; color: #cbd5e1;")
-        self.pic.setStyleSheet("background:#111;border:1px solid #333;")
-        lay.addWidget(self.pic); lay.addWidget(self.caption)
-
-    def set_item(self, img_path: str, text: str):
-        if img_path and Path(img_path).exists():
-            pm = QPixmap(img_path).scaled(self.pic.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            self.pic.setPixmap(pm)
-        else:
-            self.pic.setPixmap(QPixmap())
-        self.caption.setText(text or "—")
-
-    def clear(self):
-        self.set_item("", "—")
 
 class RobotUI(Node):
     def __init__(self):
@@ -73,6 +49,11 @@ class RobotUI(Node):
         self.sim_label.setStyleSheet("font-size: 16px; color:#fca5a5; font-weight:600;")
         wr.addWidget(self.sim_label)
 
+        self.plant_ui_label = QLabel("Plant UI: closed")
+        self.plant_ui_label.setAlignment(Qt.AlignCenter)
+        self.plant_ui_label.setStyleSheet("font-size: 14px; color:#f5d0fe;")
+        wr.addWidget(self.plant_ui_label)
+
         self.coords = QLabel("Position: (x=0.00, y=0.00, θ=0.00)")
         self.coords.setStyleSheet("font-size: 14px; color:#a1a1aa;")
         self.coords.setAlignment(Qt.AlignCenter)
@@ -92,6 +73,14 @@ class RobotUI(Node):
         self.btn_sim_stop.setStyleSheet(btn_style + "background-color: #ef4444;")
         self.btn_sim_stop.clicked.connect(self.on_sim_stop); buttons_col.addWidget(self.btn_sim_stop, alignment=Qt.AlignLeft)
 
+        self.btn_plants_start = QPushButton("🌿 OPEN PLANT UI"); self.btn_plants_start.setFixedSize(btn_w, btn_h)
+        self.btn_plants_start.setStyleSheet(btn_style + "background-color: #16a34a;")
+        self.btn_plants_start.clicked.connect(self.on_plants_open); buttons_col.addWidget(self.btn_plants_start, alignment=Qt.AlignLeft)
+
+        self.btn_plants_stop = QPushButton("🌙 CLOSE PLANT UI"); self.btn_plants_stop.setFixedSize(btn_w, btn_h)
+        self.btn_plants_stop.setStyleSheet(btn_style + "background-color: #9333ea;")
+        self.btn_plants_stop.clicked.connect(self.on_plants_close); buttons_col.addWidget(self.btn_plants_stop, alignment=Qt.AlignLeft)
+
         self.btn_start = QPushButton("▶ START"); self.btn_start.setFixedSize(btn_w, btn_h)
         self.btn_start.setStyleSheet(btn_style + "background-color: #10b981;")
         self.btn_start.clicked.connect(self.on_start); buttons_col.addWidget(self.btn_start, alignment=Qt.AlignLeft)
@@ -106,18 +95,20 @@ class RobotUI(Node):
 
         row.addLayout(buttons_col)
 
-        gallery_wrap = QVBoxLayout()
-        glabel = QLabel("Plant Checklist"); glabel.setAlignment(Qt.AlignLeft)
+        log_wrap = QVBoxLayout()
+        glabel = QLabel("Plant Visit Log"); glabel.setAlignment(Qt.AlignLeft)
         glabel.setStyleSheet("font-size:20px;color:#a7f3d0;")
-        gallery_wrap.addWidget(glabel)
+        log_wrap.addWidget(glabel)
 
-        self.grid = QGridLayout(); self.grid.setHorizontalSpacing(12); self.grid.setVerticalSpacing(12)
-        self.cells: List[GalleryCell] = []
-        for i in range(2):
-            for j in range(3):
-                cell = GalleryCell(); self.grid.addWidget(cell, i, j); self.cells.append(cell)
-        gallery_wrap.addLayout(self.grid)
-        row.addLayout(gallery_wrap, stretch=1)
+        self.plant_labels: List[QLabel] = []
+        for i in range(6):
+            lbl = QLabel(f"#{i+1}: awaiting detection")
+            lbl.setAlignment(Qt.AlignLeft)
+            lbl.setStyleSheet("font-size:16px; color:#e5e7eb; background:#111; padding:8px; border-radius:8px;")
+            log_wrap.addWidget(lbl)
+            self.plant_labels.append(lbl)
+        log_wrap.addStretch(1)
+        row.addLayout(log_wrap, stretch=1)
 
         self.window.resize(1100, 720)
         self.window.show()
@@ -141,6 +132,16 @@ class RobotUI(Node):
         self._sim_check_timer.timeout.connect(self._monitor_sim_process)
         self._sim_check_timer.start()
 
+        self._plants_proc: Optional[subprocess.Popen] = None  # type: ignore[name-defined]
+        self._plants_log = None
+        self._plants_expect_shutdown = False
+        self._plants_stop_deadline = 0.0
+        self.plant_ui_cmd = ["ros2", "run", "ve_behaviours", "ui_plants"]
+        self._plants_check_timer = QTimer()
+        self._plants_check_timer.setInterval(1000)
+        self._plants_check_timer.timeout.connect(self._monitor_plants_process)
+        self._plants_check_timer.start()
+
         # Redraw timer to keep Qt responsive alongside rclpy
         self.timer = QTimer(); self.timer.timeout.connect(self._safe_spin); self.timer.start(10)
 
@@ -151,14 +152,33 @@ class RobotUI(Node):
         except Exception:
             return
         self.items = data.get("items", [])
-        for i in range(6):
-            if i < len(self.items):
-                it = self.items[i]
-                label = f"#{i+1}  {it.get('color','?').upper()}  {it.get('condition','?')}\n" \
-                        f"({it.get('pose',{}).get('x','?')},{it.get('pose',{}).get('y','?')})  conf={it.get('confidence',0)}"
-                self.cells[i].set_item(it.get('image_path',"") or "", label)
+        for idx, lbl in enumerate(self.plant_labels):
+            if idx < len(self.items):
+                it = self.items[idx]
+                pose = it.get("pose", {})
+                x = pose.get("x", "?")
+                y = pose.get("y", "?")
+                try:
+                    x = float(x)
+                    x_str = f"{x:.2f}"
+                except Exception:
+                    x_str = str(x)
+                try:
+                    y = float(y)
+                    y_str = f"{y:.2f}"
+                except Exception:
+                    y_str = str(y)
+                color = it.get("color", "?").upper()
+                condition = it.get("condition", "?")
+                conf = it.get("confidence", 0)
+                try:
+                    conf_val = float(conf)
+                    conf_str = f"{conf_val:.2f}"
+                except Exception:
+                    conf_str = str(conf)
+                lbl.setText(f"#{idx+1}: x={x_str}, y={y_str} • {color} • {condition} • conf={conf_str}")
             else:
-                self.cells[i].clear()
+                lbl.setText(f"#{idx+1}: awaiting detection")
 
     def on_sim_start(self):
         if self._sim_running():
@@ -279,6 +299,128 @@ class RobotUI(Node):
                 pass
             self._sim_log = None
 
+    def on_plants_open(self):
+        if self._plants_running():
+            self.get_logger().info("Plant UI already running.")
+            self.plant_ui_label.setText("Plant UI: running")
+            self.plant_ui_label.setStyleSheet("font-size: 14px; color:#bbf7d0;")
+            return
+        if self._plants_proc is not None and self._plants_proc.poll() is not None:
+            self._cleanup_plants_process(self._plants_proc.poll())
+
+        log_path = Path.home() / ".ros" / "verdant_plants_ui.log"
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        try:
+            self._plants_log = open(log_path, "a", buffering=1, encoding="utf-8")
+            self._plants_log.write(f"[{datetime.now().isoformat(timespec='seconds')}] Launching plant UI...\n")
+        except Exception:
+            self._plants_log = None
+
+        try:
+            self._plants_proc = subprocess.Popen(
+                self.plant_ui_cmd,
+                stdout=self._plants_log or subprocess.DEVNULL,
+                stderr=subprocess.STDOUT if self._plants_log else subprocess.DEVNULL,
+                preexec_fn=os.setsid
+            )
+            self._plants_expect_shutdown = False
+            self.plant_ui_label.setText("Plant UI: launching…")
+            self.plant_ui_label.setStyleSheet("font-size: 14px; color:#fde68a;")
+        except Exception as exc:
+            self.get_logger().error(f"Failed to start plant UI: {exc}")
+            if self._plants_log:
+                try:
+                    self._plants_log.write(f"[{datetime.now().isoformat(timespec='seconds')}] Launch failed: {exc}\n")
+                except Exception:
+                    pass
+            self._cleanup_plants_process(exit_code=None, failed=True)
+
+    def on_plants_close(self):
+        self._request_plants_stop(force=False)
+
+    def _request_plants_stop(self, force: bool) -> None:
+        if self._plants_proc is None:
+            self.plant_ui_label.setText("Plant UI: closed")
+            self.plant_ui_label.setStyleSheet("font-size: 14px; color:#f5d0fe;")
+            return
+        if not self._plants_running():
+            self._cleanup_plants_process(self._plants_proc.poll())
+            return
+
+        sig = signal.SIGINT if not force else signal.SIGKILL
+        self._plants_expect_shutdown = True
+        if not force:
+            self._plants_stop_deadline = time.time() + 1.5
+        else:
+            self._plants_stop_deadline = 0.0
+        self.plant_ui_label.setText("Plant UI: closing…" if not force else "Plant UI: terminating…")
+        self.plant_ui_label.setStyleSheet("font-size: 14px; color:#f5d0fe;")
+        try:
+            os.killpg(os.getpgid(self._plants_proc.pid), sig)
+        except ProcessLookupError:
+            self._cleanup_plants_process(self._plants_proc.poll())
+        except Exception as exc:
+            self.get_logger().warn(f"Failed to send signal {sig} to plant UI: {exc}")
+            if not force:
+                self._request_plants_stop(force=True)
+
+    def _plants_running(self) -> bool:
+        return self._plants_proc is not None and self._plants_proc.poll() is None
+
+    def _monitor_plants_process(self):
+        if self._plants_proc is None:
+            return
+        exit_code = self._plants_proc.poll()
+        if exit_code is None:
+            if self._plants_expect_shutdown and self._plants_stop_deadline and time.time() > self._plants_stop_deadline:
+                self.get_logger().warn("Plant UI did not exit after SIGINT; sending SIGKILL.")
+                self._request_plants_stop(force=True)
+                self._plants_stop_deadline = 0.0
+            else:
+                self.plant_ui_label.setText("Plant UI: running")
+                self.plant_ui_label.setStyleSheet("font-size: 14px; color:#bbf7d0;")
+            return
+        self._cleanup_plants_process(exit_code)
+
+    def _cleanup_plants_process(self, exit_code: Optional[int], failed: bool = False) -> None:
+        expected = self._plants_expect_shutdown
+        self._plants_expect_shutdown = False
+        if self._plants_proc is not None:
+            self._plants_proc = None
+        self._close_plants_log()
+
+        if failed:
+            self.plant_ui_label.setText("Plant UI: launch failed")
+            self.plant_ui_label.setStyleSheet("font-size: 14px; color:#f87171;")
+            return
+
+        if exit_code is None:
+            exit_code = 0
+        if exit_code in (0, 130):
+            text = "Plant UI: closed" if expected else "Plant UI: exited"
+            color = "#f5d0fe" if expected else "#fde68a"
+        else:
+            text = f"Plant UI: crashed (code {exit_code})"
+            color = "#f87171"
+        self.plant_ui_label.setText(text)
+        self.plant_ui_label.setStyleSheet(f"font-size: 14px; color:{color};")
+        self._plants_stop_deadline = 0.0
+
+    def _close_plants_log(self) -> None:
+        if self._plants_log:
+            try:
+                self._plants_log.write(f"[{datetime.now().isoformat(timespec='seconds')}] Plant UI log closed.\n")
+            except Exception:
+                pass
+            try:
+                self._plants_log.close()
+            except Exception:
+                pass
+            self._plants_log = None
+
     def on_start(self):
         if not self._sim_running():
             self.get_logger().warn("Simulation is not running; launch it before starting automation.")
@@ -325,6 +467,7 @@ class RobotUI(Node):
         if rclpy.ok():
             rclpy.spin_once(self, timeout_sec=0.01)
         self._monitor_sim_process()
+        self._monitor_plants_process()
 
     def on_close(self):
         self.get_logger().info("🛑 Shutting down VerdantEye UI...")
@@ -337,11 +480,17 @@ class RobotUI(Node):
         except Exception:
             pass
         try:
+            self._plants_check_timer.stop()
+        except Exception:
+            pass
+        try:
             self.timer.stop()
         except Exception:
             pass
         self._request_sim_stop(force=True)
         self._close_sim_log()
+        self._request_plants_stop(force=True)
+        self._close_plants_log()
         self.app.quit()
         self.destroy_node()
         rclpy.shutdown()

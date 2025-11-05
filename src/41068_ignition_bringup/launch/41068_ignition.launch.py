@@ -175,17 +175,6 @@ def generate_launch_description():
         condition=IfCondition(ui_flag)
     )
 
-    # === UI (Plant Checklist Gallery) ===
-    ui_plants = Node(
-        package='ve_behaviours',
-        executable='ui_plants',
-        name='verdant_eye_gallery',
-        output='screen',
-        emulate_tty=True,
-        parameters=[{'use_sim_time': use_sim_time}],
-        condition=IfCondition(ui_flag)
-    )
-
     # === Auto Wander Depth (Nav2-integrated RGB scanner) ===
     auto_scan = Node(
         package='ve_behaviours',
@@ -210,7 +199,6 @@ def generate_launch_description():
     # Delay UIs + scanner until randomizer finishes spawning
     ld.add_action(TimerAction(period=8.0, actions=[
         ui_control,
-        ui_plants,
         auto_scan
     ]))
 
