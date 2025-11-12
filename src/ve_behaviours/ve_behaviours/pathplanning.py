@@ -2,15 +2,15 @@
 # ve_behaviours/ve_behaviours/pathplanning.py
 #
 # Global path planner over a saved occupancy grid with auto map discovery.
-# - Auto-finds <package>/maps/forest.yaml (installed share or source tree).
+# - Auto-finds <package>/maps/forest_map.yaml (installed share or source tree).
 # - Orders targets from origin by Euclidean distance (closest → furthest).
 # - Builds inflated costmap (distance transform) for safer global A*.
 # - Goal tolerance: if goal cell is blocked, snap to nearest free within tol.
 # - Prints waypoints for each leg, publishes a single /planned_path for RViz.
 #
-# Params (all optional):
-#   map_yaml          (string)  if empty -> auto-find maps/forest.yaml
-#   targets_flat      (double[]) [x1,y1, x2,y2, ...] (default = your 6 targets)
+# Params:
+#   map_yaml          (string)  if empty -> auto-find maps/forest_map.yaml
+#   targets_flat      (double[]) [x1,y1, x2,y2, ...] (plant poses)
 #   origin_xy         (double[]) [x0, y0]  (default [0.0, 0.0])
 #   goal_tolerance_m  (double)  default 1.0
 #   clearance_m       (double)  inflation radius (m), default 0.40
@@ -139,8 +139,7 @@ def astar_weighted(free_u8: np.ndarray, cost_f32: np.ndarray, start: Tuple[int,i
     return []
 
 # ---------- map auto-discovery ----------
-def resolve_map_yaml(default_name: str = "forest.yaml") -> P:
-    # 1) Installed share: <prefix>/share/ve_behaviours/maps/forest.yaml
+def resolve_map_yaml(default_name: str = "forest_map.yaml") -> P:
     try:
         from ament_index_python.packages import get_package_share_directory
         share_dir = P(get_package_share_directory('ve_behaviours'))
@@ -149,13 +148,10 @@ def resolve_map_yaml(default_name: str = "forest.yaml") -> P:
             return candidate
     except Exception:
         pass
-    # 2) Source tree relative to this script: src/ve_behaviours/maps/forest.yaml
     here = P(__file__).resolve()
-    # file layout in source: src/ve_behaviours/ve_behaviours/pathplanning.py
     src_maps = (here.parent.parent / 'maps' / default_name).resolve()
     if src_maps.is_file():
         return src_maps
-    # If we got here, neither path exists—bail with something obvious in the logs.
     raise FileNotFoundError(f"Could not find {default_name} in package share or source maps folder.")
 
 class TargetPlanner(Node):
@@ -163,13 +159,12 @@ class TargetPlanner(Node):
         super().__init__('pathplanning')
 
         # ----- parameters -----
-        # map_yaml empty string means “auto-discover forest.yaml” using the helper above.
         self.declare_parameter('map_yaml', '')
-        # Flattened [x1,y1, x2,y2,...] target list; you reorder later by distance to origin.
+        # Flattened [x1,y1, x2,y2,...] target list.
         self.declare_parameter('targets_flat', [0.0,-5.0, -9.0,6.0, 5.0,1.0, -2.0,7.0, 8.0,-3.0, -7.0,1.0])
         self.declare_parameter('origin_xy', [0.0, 0.0])
         self.declare_parameter('goal_tolerance_m', 1.0)
-        self.declare_parameter('clearance_m', 0.40)
+        self.declare_parameter('clearance_m', 1.00)
         self.declare_parameter('spacing_m', 0.75)
         self.declare_parameter('publish_path', True)
 
@@ -181,7 +176,7 @@ class TargetPlanner(Node):
             if not map_yaml_p.is_absolute():
                 map_yaml_p = (P.cwd() / map_yaml_p).resolve()
         else:
-            map_yaml_p = resolve_map_yaml("forest.yaml")
+            map_yaml_p = resolve_map_yaml("forest_map.yaml")
 
         # Load map metadata (YAML) and its image (pgm/png). Respect negate flag.
         meta = yaml.safe_load(open(map_yaml_p, 'r'))
@@ -305,7 +300,7 @@ class TargetPlanner(Node):
 
         print(f"\n# Total waypoints across all legs: {len(final_wps)}\n")
 
-        # Publish once to /planned_path so RViz (or your own marker node) can visualise.
+        # Publish once to /planned_path so RViz can visualise.
         if bool(self.get_parameter('publish_path').value) and final_wps:
             # NOTE: QoS is default (volatile). If late subscribers need it,
             # switch this to TRANSIENT_LOCAL in code later.

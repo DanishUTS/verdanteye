@@ -5,7 +5,7 @@ import os
 
 def generate_launch_description():
     pkg_share = get_package_share_directory('ve_behaviours')
-    map_yaml = os.path.join(pkg_share, 'maps', 'forest.yaml')
+    map_yaml = os.path.join(pkg_share, 'maps', 'forest_map.yaml')
 
     # 1) Map server (lifecycle node)
     map_server = Node(
